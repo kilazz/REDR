@@ -263,8 +263,6 @@ export component AppWindow inherits Window {
 
     // Settings
     in-out property <bool> consider_empty_files_empty: true;
-    // Default aligned with the CLI's --ignore-hidden default (true) so GUI and
-    // CLI behave the same out of the box.
     in-out property <bool> ignore_hidden: true;
     in-out property <bool> ignore_errors: true;
     in-out property <bool> hide_search_errors: true;
@@ -273,7 +271,7 @@ export component AppWindow inherits Window {
     // Ignore list
     in-out property <string> ignore_list_text: "System Volume Information\nRECYCLER\nRecycled\nNtUninstall\n$RECYCLE.BIN\nGAC_MSIL\nGAC_32\nwinsxs\nSystem32\nC:\\Users\\Zed\\AppData\\Local\\Packages";
 
-    // Advanced settings
+    // Advanced settings (Moved to general Settings tab)
     in-out property <bool> skip_system: true;
     in-out property <int> max_depth: -1;
     in-out property <int> min_age_hours: 0;
@@ -299,9 +297,7 @@ export component AppWindow inherits Window {
             Button { text: "Find"; clicked => { root.active_tab = 0; } }
             Button { text: "Settings"; clicked => { root.active_tab = 1; } }
             Button { text: "Ignore list"; clicked => { root.active_tab = 2; } }
-            Button { text: "Advanced settings"; clicked => { root.active_tab = 3; } }
-            Button { text: "About"; clicked => { root.active_tab = 4; } }
-            Button { text: "Log"; clicked => { root.active_tab = 5; } }
+            Button { text: "Log"; clicked => { root.active_tab = 3; } }
         }
 
         Rectangle {
@@ -444,7 +440,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout { spacing: 8px; height: 18px; Rectangle { width: 16px; height: 16px; ProtectedIcon {} } Text { text: "Protected"; color: #55A0FF; vertical-alignment: center; } }
                             HorizontalLayout { spacing: 8px; height: 18px; Rectangle { width: 16px; height: 16px; DeletedIcon {} } Text { text: "Deleted"; color: #55FF55; vertical-alignment: center; } }
 
-                            Rectangle {} // Flexible Spacer: absorbs all extra vertical space to prevent drifting [1]
+                            Rectangle {} // Flexible Spacer
 
                             HorizontalLayout { spacing: 8px; height: 16px; Rectangle { width: 12px; height: 12px; background: #D4D4D4; border-radius: 2px; y: 2px; } Text { text: "Will not be touched"; vertical-alignment: center; color: #D4D4D4; font-size: 11px; } }
                             HorizontalLayout { spacing: 8px; height: 16px; Rectangle { width: 12px; height: 12px; background: #FF5555; border-radius: 2px; y: 2px; } Text { text: "Will be deleted"; vertical-alignment: center; color: #D4D4D4; font-size: 11px; } }
@@ -482,57 +478,28 @@ export component AppWindow inherits Window {
                     Button { text: "Search again"; clicked => { root.search_folders(); } enabled: !root.is_scanning && !root.is_deleting; }
                     Button { text: "Delete matches"; clicked => { root.delete_folders(); } enabled: !root.is_scanning && !root.is_deleting && root.directories.length > 0; }
                     Button { text: "Cancel"; clicked => { root.cancel_operation(); } enabled: root.is_scanning || root.is_deleting; }
-                    Button { text: "Show logs"; clicked => { root.active_tab = 5; } }
+                    Button { text: "Show logs"; clicked => { root.active_tab = 3; } }
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "Exit"; clicked => { root.exit_app(); } }
                 }
             }
 
-            // Settings Tab
+            // Settings Tab (Combined with Advanced settings)
             if root.active_tab == 1 : ScrollView {
                 VerticalLayout {
                     padding: 20px;
                     spacing: 20px;
 
-                    Text { text: "General options"; font-weight: 700; }
+                    Text { text: "General Options"; font-weight: 700; }
                     CheckBox { text: "Directories with empty files will be considered empty"; checked <=> root.consider_empty_files_empty; }
                     CheckBox { text: "Ignore hidden directories"; checked <=> root.ignore_hidden; }
                     CheckBox { text: "Ignore errors during deletion"; checked <=> root.ignore_errors; }
                     CheckBox { text: "Hide search errors (like access denied errors)"; checked <=> root.hide_search_errors; }
+                    CheckBox { text: "Skip system directories (recommended)"; checked <=> root.skip_system; }
 
                     Rectangle { height: 1px; background: #3e3e42; vertical-stretch: 0; }
 
-                    Text { text: "Delete mode"; font-weight: 700; }
-                    Text { text: "How should empty directories be deleted?"; }
-                    ComboBox {
-                        model: ["Delete to recycle bin and ignore errors (safer)", "Delete permanently"];
-                        current-index <=> root.delete_mode;
-                        height: 35px;
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                }
-            }
-
-            // Ignore list Tab
-            if root.active_tab == 2 : VerticalLayout {
-                padding: 20px;
-                spacing: 10px;
-                Text { text: "When a directory name matches an item of this list it will be skipped."; }
-                TextEdit {
-                    text <=> root.ignore_list_text;
-                    vertical-stretch: 1;
-                }
-            }
-
-            // Advanced settings Tab
-            if root.active_tab == 3 : ScrollView {
-                VerticalLayout {
-                    padding: 20px;
-                    spacing: 20px;
-
-                    Text { text: "Advanced settings"; font-weight: 700; }
-                    CheckBox { text: "Skip system directories (recommended)"; checked <=> root.skip_system; }
-
+                    Text { text: "Limits & Performance"; font-weight: 700; }
                     HorizontalLayout {
                         spacing: 20px;
                         VerticalLayout {
@@ -555,7 +522,18 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
                                 SpinBox { value <=> root.min_age_hours; minimum: 0; width: 100px; height: 35px; }
                             }
+                            Rectangle {} // Empty spacer for visual alignment
                         }
+                    }
+
+                    Rectangle { height: 1px; background: #3e3e42; vertical-stretch: 0; }
+
+                    Text { text: "Delete Mode"; font-weight: 700; }
+                    Text { text: "How should empty directories be deleted?"; }
+                    ComboBox {
+                        model: ["Delete to recycle bin and ignore errors (safer)", "Delete permanently"];
+                        current-index <=> root.delete_mode;
+                        height: 35px;
                     }
 
                     Rectangle { height: 1px; background: #3e3e42; vertical-stretch: 0; }
@@ -570,17 +548,19 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // About Tab
-            if root.active_tab == 4 : VerticalLayout {
+            // Ignore list Tab
+            if root.active_tab == 2 : VerticalLayout {
                 padding: 20px;
                 spacing: 10px;
-                alignment: center;
-                Text { text: "Remove Empty Directories (Rust/Slint Clone)"; font-size: 20px; font-weight: 700; horizontal-alignment: center; }
-                Text { text: "Refactored with Rust and Slint for cross-platform speed."; horizontal-alignment: center; }
+                Text { text: "When a directory name matches an item of this list it will be skipped."; }
+                TextEdit {
+                    text <=> root.ignore_list_text;
+                    vertical-stretch: 1;
+                }
             }
 
             // Log Tab
-            if root.active_tab == 5 : VerticalLayout {
+            if root.active_tab == 3 : VerticalLayout {
                 padding: 15px;
                 spacing: 10px;
                 TextEdit {
