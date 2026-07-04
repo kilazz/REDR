@@ -1,4 +1,8 @@
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+// Hide the console window on Windows when compiling in release mode
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 slint::include_modules!();
 
@@ -243,7 +247,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
 
     let found_folders = Arc::new(Mutex::new(Vec::<scanner::DirectoryNode>::new()));
-    let cancel_flag = Arc::new(AtomicBool::new(false)); // Shared cancellation token [1]
+    let cancel_flag = Arc::new(AtomicBool::new(false));
 
     ui.set_directories(ModelRc::from(Rc::new(VecModel::from(vec![]))));
 
@@ -253,13 +257,19 @@ fn main() -> Result<(), slint::PlatformError> {
     // Background thread to manage logs, progress metrics, and UI state updates
     thread::spawn(move || {
         let mut logs = VecDeque::with_capacity(300);
+        let mut last_rebuild_time = std::time::Instant::now();
+        let mut pending_status_updates = false;
+
         while let Ok(evt) = log_rx.recv() {
             let mut status_updates = Vec::new();
             let mut progress_update = None;
 
             let mut process_event = |e: LogEvent| match e {
                 LogEvent::Msg(msg) => logs.push_back(msg),
-                LogEvent::StatusChange(index, status) => status_updates.push((index, status)),
+                LogEvent::StatusChange(index, status) => {
+                    status_updates.push((index, status));
+                    pending_status_updates = true;
+                }
                 LogEvent::Progress(p) => progress_update = Some(p),
             };
 
@@ -284,17 +294,30 @@ fn main() -> Result<(), slint::PlatformError> {
                 folders.clone()
             };
 
+            // Throttle tree view model rebuilding
+            let now = std::time::Instant::now();
+            let elapsed_ms = now.duration_since(last_rebuild_time).as_millis();
+
+            let is_finished = progress_update.map(|p| p >= 1.0).unwrap_or(false);
+
+            // Rebuild tree if status changed AND either 120ms passed, or we finished, or total size is small (< 150 items)
+            let should_rebuild = pending_status_updates
+                && (elapsed_ms >= 120 || folders_clone.len() < 150 || is_finished);
+
+            if should_rebuild {
+                last_rebuild_time = now;
+                pending_status_updates = false;
+            }
+
             let combined = logs.iter().cloned().collect::<String>();
             let _ = ui_weak_log.upgrade_in_event_loop(move |ui| {
                 ui.set_log_text(combined.into());
 
-                // Update progress smoothly if an event was received
                 if let Some(p) = progress_update {
                     ui.set_progress(p);
                 }
 
-                // Only rebuild the heavy list if statuses actually changed
-                if !status_updates.is_empty() {
+                if should_rebuild {
                     let list_items = rebuild_visible_items(&folders_clone);
                     let new_model = Rc::new(VecModel::from(list_items));
                     ui.set_directories(new_model.into());
@@ -319,7 +342,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui_weak_cancel = ui_handle.clone();
     let cancel_flag_cancel = cancel_flag.clone();
     ui.on_cancel_operation(move || {
-        // Toggle the global cancellation token and notify UI immediately [2]
         cancel_flag_cancel.store(true, Ordering::Relaxed);
         if let Some(ui) = ui_weak_cancel.upgrade() {
             ui.set_status_msg("Cancellation requested...".into());
@@ -390,7 +412,7 @@ fn main() -> Result<(), slint::PlatformError> {
             consider_empty_files_empty,
         };
 
-        cancel_flag_thread.store(false, Ordering::Relaxed); // Reset token before operation [3]
+        cancel_flag_thread.store(false, Ordering::Relaxed);
 
         let ui_weak_thread = ui.as_weak();
         thread::spawn(move || {
@@ -472,7 +494,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_progress(0.0);
 
         let ui_weak_thread = ui.as_weak();
-        cancel_flag_thread.store(false, Ordering::Relaxed); // Reset token before operation [3]
+        cancel_flag_thread.store(false, Ordering::Relaxed);
 
         thread::spawn(move || {
             let mut dirs = {
@@ -506,7 +528,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &settings,
                 &|msg, idx, stat| logger.status(msg, idx, stat),
                 &|p| logger.progress(p),
-                &cancel_flag_thread, // Forward cancellation token reference
+                &cancel_flag_thread,
             );
 
             let was_cancelled = cancel_flag_thread.load(Ordering::Relaxed);

@@ -33,7 +33,7 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
     root: &Path,
     settings: &ScanSettings,
     _log: &F,
-    cancel_flag: &Arc<AtomicBool>, // Changed from AtomicUsize to AtomicBool
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<Vec<DirectoryNode>, String> {
     let file_matchers: Vec<WildMatch> = settings
         .ignore_files
@@ -164,7 +164,6 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
                 empty_dirs_found.insert(p.clone());
                 included_dirs.insert(p.clone());
 
-                // Optimization: stop parent traversal early if it was already added to the set
                 let mut parent = p.parent();
                 while let Some(par) = parent {
                     if !included_dirs.insert(par.to_path_buf()) {
@@ -256,7 +255,7 @@ fn clean_and_verify_empty(
     // 1. Check if the directory itself is a symlink/junction
     let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
     if meta.is_symlink() {
-        // If it's a symlink, treat it as an "empty" element so we safely delete the link, not its contents
+        // If it is a symlink, treat it as an "empty" element and allow deleting the link itself
         return Ok(true);
     }
 
@@ -274,7 +273,7 @@ fn clean_and_verify_empty(
                     && fs::metadata(&cp).map(|m| m.len() == 0).unwrap_or(false);
 
                 if is_ignored || is_empty_file {
-                    // Symlinks inside the dir are safely deleted without traversing them
+                    // Symlinks are safely deleted via remove_file/remove_dir without traversing
                     let _ = fs::remove_file(&cp).or_else(|_| fs::remove_dir(&cp));
                 }
             }
@@ -298,7 +297,7 @@ pub fn delete_empty_dirs<F, P>(
     settings: &DeleteSettings,
     log: &F,
     progress_cb: &P,
-    cancel_flag: &Arc<AtomicBool>, // Changed from AtomicUsize to AtomicBool
+    cancel_flag: &Arc<AtomicBool>,
 ) -> (usize, usize)
 where
     F: Fn(&str, usize, i32),
@@ -314,7 +313,7 @@ where
     for (i, node) in nodes.iter().enumerate() {
         if node.status == 1 {
             depths.entry(node.depth).or_default().push(i);
-            total_items += 1; // Count total files for progress calculation
+            total_items += 1;
         }
     }
 
@@ -329,10 +328,9 @@ where
             break;
         }
 
-        if settings.pause_ms == 0 {
-            // Fast parallel path
+        // Rayon Optimization: if there is only 1 directory on this level, delete it sequentially to avoid thread spawning overhead
+        if settings.pause_ms == 0 && indices.len() > 1 {
             let results: Vec<_> = {
-                // Borrow immutably in a restricted scope to satisfy Sync bounds
                 let nodes_ref: &[DirectoryNode] = nodes;
                 let cancel_inner = cancel_flag.clone();
                 indices
@@ -388,7 +386,7 @@ where
                         }
                     })
                     .collect()
-            }; // Immutable borrow of 'nodes' drops here
+            };
 
             let mut abort = false;
             for (i, status, msg, _err) in results {
@@ -404,7 +402,7 @@ where
                 progress_cb(processed_items as f32 / total_items as f32);
 
                 log(&msg, i, status);
-                nodes[i].status = status; // Safe to mutate sequentially now
+                nodes[i].status = status;
 
                 if status == 2 {
                     deleted += 1;
@@ -421,7 +419,7 @@ where
                 break;
             }
         } else {
-            // Slow sequential path with pause
+            // Slow sequential path with pause, or single directory fallback
             let mut abort = false;
             for &i in &indices {
                 if cancel_flag.load(Ordering::Relaxed) {
@@ -451,7 +449,7 @@ where
                         match res {
                             Ok(_) => {
                                 log(&format!("Deleted: {}", dir.display()), i, 2);
-                                nodes[i].status = 2; // Mutate status safely
+                                nodes[i].status = 2;
                                 deleted += 1;
                             }
                             Err(e) => {

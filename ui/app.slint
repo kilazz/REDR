@@ -53,7 +53,7 @@ component ProtectedIcon {
         // Lock shackle
         Rectangle {
             x: 2px;
-            y: 5px;
+            y: -5px;
             width: 6px;
             height: 6px;
             border-color: #55A0FF;
@@ -98,9 +98,7 @@ component TrashFolderIcon {
     Rectangle {
         width: 100%;
         height: 100%;
-        FolderIcon {
-            fill-color: root.folder-color;
-        }
+        FolderIcon { fill-color: root.folder-color; }
         // Green plus symbol in the corner
         Rectangle {
             x: 9px;
@@ -190,6 +188,38 @@ component NeverEmptyFolderIcon {
                 height: 1px;
                 background: #FF5555;
             }
+        }
+    }
+}
+
+// Custom vector expand/collapse box (replaces broken Unicode boxes)
+component ExpandCollapseIcon {
+    in property <bool> is_expanded;
+    width: 11px;
+    height: 11px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-color: #666666;
+        border-width: 1px;
+        background: #2d2d30;
+        border-radius: 1px;
+
+        // Horizontal line
+        Rectangle {
+            x: 2px;
+            y: 5px;
+            width: 7px;
+            height: 1px;
+            background: #D4D4D4;
+        }
+        // Vertical line (renders only when collapsed)
+        if !root.is_expanded : Rectangle {
+            x: 5px;
+            y: 2px;
+            width: 1px;
+            height: 7px;
+            background: #D4D4D4;
         }
     }
 }
@@ -344,11 +374,9 @@ export component AppWindow inherits Window {
 
                                     Rectangle {
                                         width: 15px;
-                                        Text {
-                                            text: item.has_children ? (item.is_expanded ? "⊟" : "⊞") : "";
-                                            color: #D4D4D4;
-                                            vertical-alignment: center;
-                                            horizontal-alignment: center;
+                                        if item.has_children : ExpandCollapseIcon {
+                                            is_expanded: item.is_expanded;
+                                            y: 7px;
                                         }
                                         TouchArea {
                                             clicked => {
@@ -363,22 +391,22 @@ export component AppWindow inherits Window {
 
                                         if item.is_root : HomeIcon {
                                             y: 4.5px;
-                                            fill-color: item.status == 1 ? #FF5555 : (item.status == 2 ? #55FF55 : (item.status == 3 ? #55A0FF : (item.status == 4 ? #FFB86C : #D4D4D4)));
+                                            fill-color: #E0A96D;
                                         }
-                                        if !item.is_root && item.status == 2 : DeletedIcon {
+                                        if item.is_root == false && item.status == 2 : DeletedIcon {
                                             y: 4.5px;
                                         }
-                                        if !item.is_root && item.status == 4 : FailedIcon {
+                                        if item.is_root == false && item.status == 4 : FailedIcon {
                                             y: 4.5px;
                                         }
-                                        if !item.is_root && item.status == 3 : ProtectedIcon {
+                                        if item.is_root == false && item.status == 3 : ProtectedIcon {
                                             y: 4.5px;
                                         }
-                                        if !item.is_root && item.status == 0 : NeverEmptyFolderIcon {
+                                        if item.is_root == false && item.status == 0 : NeverEmptyFolderIcon {
                                             y: 4.5px;
                                             fill-color: #D4D4D4;
                                         }
-                                        if !item.is_root && item.status == 1 : FolderIcon {
+                                        if item.is_root == false && item.status == 1 : FolderIcon {
                                             y: 4.5px;
                                             fill-color: #FF5555;
                                         }
