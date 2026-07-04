@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wildmatch::WildMatch;
@@ -24,7 +24,7 @@ pub struct ScanSettings {
 
 #[derive(Clone, Debug)]
 pub struct DirectoryNode {
-    pub path: PathBuf,
+    pub path: Arc<Path>,
     pub name: String,
     pub depth: i32,
     pub status: i32,
@@ -44,10 +44,10 @@ enum WalkMsg {
 /// Walks up from `start` toward `root`, adding every ancestor to `included`
 /// so it appears in the tree view. Stops as soon as an ancestor is already
 /// present (it and everything above it was already added).
-fn add_ancestors(included: &mut FxHashSet<PathBuf>, start: &Path, root: &Path) {
+fn add_ancestors(included: &mut FxHashSet<Arc<Path>>, start: &Path, root: &Path) {
     let mut parent = start.parent();
     while let Some(par) = parent {
-        if !included.insert(par.to_path_buf()) {
+        if !included.insert(Arc::from(par)) {
             break;
         }
         if par == root {
@@ -154,7 +154,7 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
     let mut entry_states: Vec<_> = entries
         .into_par_iter()
         .map(|entry| {
-            let p = entry.path().to_path_buf();
+            let p = Arc::<Path>::from(entry.path());
             let depth = entry.depth();
             let file_type = entry.file_type();
             let file_name = entry.file_name().to_string_lossy().into_owned();
@@ -195,12 +195,12 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
     // Sort bottom-up for correct analysis of cascading emptiness
     entry_states.sort_by_key(|(_, d, _, _, _, _, _)| std::cmp::Reverse(*d));
 
-    // FxHashMap/FxHashSet: faster non-cryptographic hashing for PathBuf keys
+    // FxHashMap/FxHashSet: faster non-cryptographic hashing for Arc<Path> keys
     // than the default SipHash-based std collections, meaningful on large trees.
-    let mut dir_status: FxHashMap<PathBuf, bool> = FxHashMap::default();
-    let mut included_dirs: FxHashSet<PathBuf> = FxHashSet::default();
-    let mut empty_dirs_found: FxHashSet<PathBuf> = FxHashSet::default();
-    let mut protected_dirs: FxHashSet<PathBuf> = FxHashSet::default();
+    let mut dir_status: FxHashMap<Arc<Path>, bool> = FxHashMap::default();
+    let mut included_dirs: FxHashSet<Arc<Path>> = FxHashSet::default();
+    let mut empty_dirs_found: FxHashSet<Arc<Path>> = FxHashSet::default();
+    let mut protected_dirs: FxHashSet<Arc<Path>> = FxHashSet::default();
 
     for (p, depth, is_dir, is_file, child_name, is_young_dir, is_empty_file) in entry_states {
         // Stop sweep reduction immediately if cancellation is requested
@@ -210,7 +210,7 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
 
         if settings.max_depth >= 0 && (depth as i32) > settings.max_depth {
             if let Some(parent) = p.parent() {
-                dir_status.insert(parent.to_path_buf(), false);
+                dir_status.insert(Arc::from(parent), false);
             }
             continue;
         }
@@ -229,10 +229,6 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
                     let full_path_lower = p.to_string_lossy().replace('\\', "/").to_lowercase();
                     dir_matchers.iter().any(|m| full_path_lower.contains(m))
                 };
-                // These used to be combined with OR into a single condition, which
-                // meant "keep_system" (default: on) silently protected every
-                // dot-directory regardless of the "ignore_hidden" checkbox state.
-                // They are now independent checks.
                 let matches_hidden = settings.ignore_hidden && dir_name.starts_with('.');
                 let matches_system = settings.keep_system && is_system_dir(&p);
 
@@ -244,14 +240,14 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
 
             dir_status.insert(p.clone(), is_empty);
 
-            if p != root {
+            if p.as_ref() != root {
                 if is_empty {
                     empty_dirs_found.insert(p.clone());
                     included_dirs.insert(p.clone());
                     add_ancestors(&mut included_dirs, &p, root);
                 } else {
                     if let Some(parent) = p.parent() {
-                        dir_status.insert(parent.to_path_buf(), false);
+                        dir_status.insert(Arc::from(parent), false);
                     }
                     // A directory that would otherwise be empty, but is protected
                     // (ignore list / hidden / system / too young), is now surfaced
@@ -268,24 +264,17 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
             && !file_matchers.iter().any(|m| m.matches(&child_name))
             && let Some(parent) = p.parent()
         {
-            dir_status.insert(parent.to_path_buf(), false);
+            dir_status.insert(Arc::from(parent), false);
         } else if !is_dir
             && !is_file
             && !file_matchers.iter().any(|m| m.matches(&child_name))
             && let Some(parent) = p.parent()
         {
-            // Symlinks (and any other special entry type) fall through both
-            // is_dir and is_file when the walker doesn't follow links. They used
-            // to be silently ignored here, which made a directory containing only
-            // a symlink look "empty" during scanning even though deletion later
-            // refuses to remove it (clean_and_verify_empty keeps unignored
-            // symlinks in place). Treating them as real content keeps scan-time
-            // and delete-time behavior consistent.
-            dir_status.insert(parent.to_path_buf(), false);
+            dir_status.insert(Arc::from(parent), false);
         }
     }
 
-    let mut sorted_paths: Vec<PathBuf> = included_dirs.into_iter().collect();
+    let mut sorted_paths: Vec<Arc<Path>> = included_dirs.into_iter().collect();
     sorted_paths.sort();
 
     let mut result = Vec::new();
@@ -293,7 +282,7 @@ pub fn scan_empty_dirs<F: Fn(&str)>(
         let is_empty = empty_dirs_found.contains(&p);
         let is_protected = protected_dirs.contains(&p);
         let depth = (p.components().count() as i32) - root_depth;
-        let name = if p == root {
+        let name = if p.as_ref() == root {
             p.to_string_lossy().into_owned()
         } else {
             p.file_name()

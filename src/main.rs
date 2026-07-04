@@ -240,10 +240,14 @@ fn main() -> Result<(), slint::PlatformError> {
                     if !cli.quiet {
                         eprintln!("[!] Error: {}", e);
                     }
+                    std::process::exit(1);
                 }
             }
         } else {
-            eprintln!("[!] Error: Path is required for CLI/Quiet mode.");
+            if !cli.quiet {
+                eprintln!("[!] Error: Path is required for CLI/Quiet mode.");
+            }
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -277,9 +281,13 @@ fn main() -> Result<(), slint::PlatformError> {
         while let Ok(evt) = log_rx.recv() {
             let mut status_updates = Vec::new();
             let mut progress_update = None;
+            let mut logs_changed = false;
 
             let mut process_event = |e: LogEvent| match e {
-                LogEvent::Msg(msg) => logs.push_back(msg),
+                LogEvent::Msg(msg) => {
+                    logs.push_back(msg);
+                    logs_changed = true;
+                }
                 LogEvent::StatusChange(index, status) => {
                     status_updates.push((index, status));
                     pending_status_updates = true;
@@ -296,6 +304,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
             while logs.len() > 250 {
                 logs.pop_front();
+                logs_changed = true;
             }
 
             let folders_clone = {
@@ -323,9 +332,16 @@ fn main() -> Result<(), slint::PlatformError> {
                 pending_status_updates = false;
             }
 
-            let combined = logs.iter().cloned().collect::<String>();
+            let combined = if logs_changed {
+                Some(logs.iter().cloned().collect::<String>())
+            } else {
+                None
+            };
+
             let _ = ui_weak_log.upgrade_in_event_loop(move |ui| {
-                ui.set_log_text(combined.into());
+                if let Some(log_str) = combined {
+                    ui.set_log_text(log_str.into());
+                }
 
                 if let Some(p) = progress_update {
                     ui.set_progress(p);
