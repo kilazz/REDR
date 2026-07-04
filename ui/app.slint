@@ -1,0 +1,429 @@
+import { ListView, CheckBox, TextEdit, LineEdit, SpinBox, ComboBox, ScrollView, Button, ProgressIndicator, Palette } from "std-widgets.slint";
+
+component FolderIcon {
+    in property <color> fill-color: #D4D4D4;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: "M 1 2 L 6 2 L 8 4 L 15 4 L 15 13 L 1 13 Z";
+        fill: root.fill-color;
+    }
+}
+
+component HomeIcon {
+    in property <color> fill-color: #D4D4D4;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: "M 8 1 L 1 7 L 3 7 L 3 15 L 13 15 L 13 7 L 15 7 Z";
+        fill: root.fill-color;
+    }
+}
+
+component CheckIcon {
+    in property <color> fill-color: #55FF55;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: "M 3 8 L 7 12 L 14 3";
+        stroke: root.fill-color;
+        stroke-width: 2px;
+    }
+}
+
+component LockIcon {
+    in property <color> fill-color: #55A0FF;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: "M 4 8 L 4 5 C 4 1, 12 1, 12 5 L 12 8 L 14 8 L 14 15 L 2 15 L 2 8 Z";
+        fill: root.fill-color;
+    }
+}
+
+component WarningIcon {
+    in property <color> fill-color: #FFB86C;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: 100%;
+        height: 100%;
+        commands: "M 8 1 L 15 14 L 1 14 Z";
+        fill: root.fill-color;
+    }
+}
+
+export struct DirectoryItem {
+    name: string,
+    path: string,
+    depth: int,
+    status: int, // 0: Normal(Grey), 1: Empty(Red), 2: Deleted(Green), 3: Protected(Blue), 4: Failed(Orange)
+    has_children: bool,
+    is_expanded: bool,
+    id: int,
+    is_root: bool,
+    tree_prefix: string,
+    tree_lines: [int],
+}
+
+export component AppWindow inherits Window {
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+    }
+
+    title: "Remove Empty Directories";
+    min-width: 850px;
+    min-height: 650px;
+    background: #1e1e1e;
+
+    in-out property <int> active_tab: 0;
+
+    in-out property <string> selected_folder: "";
+    in-out property <string> log_text: "";
+    in-out property <string> status_msg: "Ready.";
+    in-out property <[DirectoryItem]> directories: [];
+    in-out property <bool> is_scanning: false;
+    in-out property <bool> is_deleting: false;
+    in-out property <float> progress: 0.0;
+
+    in-out property <int> empty_count: 0;
+    in-out property <int> deleted_count: 0;
+    in-out property <int> failed_count: 0;
+
+    // Settings
+    in-out property <bool> consider_empty_files_empty: true;
+    in-out property <bool> ignore_hidden: false;
+    in-out property <bool> ignore_errors: true;
+    in-out property <bool> hide_search_errors: true;
+    in-out property <int> delete_mode: 0; // 0 = Trash, 1 = Permanent
+
+    // Ignore list
+    in-out property <string> ignore_list_text: "System Volume Information\nRECYCLER\nRecycled\nNtUninstall\n$RECYCLE.BIN\nGAC_MSIL\nGAC_32\nwinsxs\nSystem32\nC:\\Users\\Zed\\AppData\\Local\\Packages";
+
+    // Advanced settings
+    in-out property <bool> skip_system: true;
+    in-out property <int> max_depth: -1;
+    in-out property <int> min_age_hours: 0;
+    in-out property <int> pause_ms: 0;
+    in-out property <string> ignore_files_text: "desktop.ini\nThumbs.db\n.DS_Store";
+
+    callback browse_folder() -> string;
+    callback search_folders();
+    callback delete_folders();
+    callback cancel_operation();
+    callback exit_app();
+    callback toggle_expand(int);
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 5px;
+            alignment: start;
+            height: 30px;
+
+            Button { text: "Find"; clicked => { root.active_tab = 0; } }
+            Button { text: "Settings"; clicked => { root.active_tab = 1; } }
+            Button { text: "Ignore list"; clicked => { root.active_tab = 2; } }
+            Button { text: "Advanced settings"; clicked => { root.active_tab = 3; } }
+            Button { text: "About"; clicked => { root.active_tab = 4; } }
+            Button { text: "Log"; clicked => { root.active_tab = 5; } }
+        }
+
+        Rectangle {
+            background: #252526;
+            border-color: #3e3e42;
+            border-width: 1px;
+            vertical-stretch: 1;
+
+            // Find
+            if root.active_tab == 0 : VerticalLayout {
+                padding: 15px;
+                spacing: 10px;
+
+                Text { text: "Please choose a directory to check:"; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    height: 30px;
+                    LineEdit {
+                        text <=> root.selected_folder;
+                        vertical-stretch: 1;
+                    }
+                    Button {
+                        text: "Browse...";
+                        clicked => { root.selected_folder = root.browse_folder(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    vertical-stretch: 1;
+
+                    Rectangle {
+                        border-color: #3e3e42;
+                        border-width: 1px;
+                        horizontal-stretch: 1;
+                        background: #1e1e1e;
+
+                        ListView {
+                            for item in root.directories: Rectangle {
+                                height: 25px;
+                                HorizontalLayout {
+                                    padding-left: 5px;
+                                    spacing: 5px;
+                                    alignment: start;
+
+                                    for line in item.tree_lines: Rectangle {
+                                        width: 20px;
+                                        height: 25px; // full height of the row
+
+                                        // Vertical line segment (for line == 1, 2, or 3)
+                                        if line == 1 || line == 2 : Rectangle {
+                                            x: parent.width / 2;
+                                            y: 0px;
+                                            width: 1px;
+                                            height: parent.height;
+                                            background: #666666;
+                                        }
+                                        // Vertical line segment for L-junction (top half only)
+                                        if line == 3 : Rectangle {
+                                            x: parent.width / 2;
+                                            y: 0px;
+                                            width: 1px;
+                                            height: parent.height / 2;
+                                            background: #666666;
+                                        }
+                                        // Horizontal line segment (for line == 2 or 3)
+                                        if line == 2 || line == 3 : Rectangle {
+                                            x: parent.width / 2;
+                                            y: parent.height / 2;
+                                            width: parent.width / 2;
+                                            height: 1px;
+                                            background: #666666;
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 15px;
+                                        Text {
+                                            text: item.has_children ? (item.is_expanded ? "⊟" : "⊞") : "";
+                                            color: #D4D4D4;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: center;
+                                        }
+                                        TouchArea {
+                                            clicked => {
+                                                if (item.has_children) {
+                                                    root.toggle_expand(item.id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 16px;
+
+                                        if item.is_root : HomeIcon {
+                                            y: 4.5px;
+                                            fill-color: item.status == 1 ? #FF5555 : (item.status == 2 ? #55FF55 : (item.status == 3 ? #55A0FF : (item.status == 4 ? #FFB86C : #D4D4D4)));
+                                        }
+                                        if !item.is_root && item.status == 2 : CheckIcon {
+                                            y: 4.5px;
+                                            fill-color: #55FF55;
+                                        }
+                                        if !item.is_root && item.status == 4 : WarningIcon {
+                                            y: 4.5px;
+                                            fill-color: #FFB86C;
+                                        }
+                                        if !item.is_root && item.status == 3 : LockIcon {
+                                            y: 4.5px;
+                                            fill-color: #55A0FF;
+                                        }
+                                        if !item.is_root && item.status != 2 && item.status != 3 && item.status != 4 : FolderIcon {
+                                            y: 4.5px;
+                                            fill-color: item.status == 1 ? #FF5555 : #D4D4D4;
+                                        }
+                                    }
+                                    Text {
+                                        text: item.name;
+                                        color: item.status == 1 ? #FF5555 : (item.status == 2 ? #55FF55 : (item.status == 3 ? #55A0FF : (item.status == 4 ? #FFB86C : #D4D4D4)));
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 200px;
+                        border-color: #3e3e42;
+                        border-width: 1px;
+                        background: #2d2d30;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 5px;
+                            Text { text: "Icon description"; font-weight: 700; color: #FFFFFF; }
+                            Text { text: "📁 Root"; color: #D4D4D4; }
+                            Text { text: "📁 Empty"; color: #FF5555; }
+                            Text { text: "📁 Contains \"trash\""; color: #BDB76B; }
+                            Text { text: "📁 Hidden"; color: #A9A9A9; }
+                            Text { text: "📁 Locked"; color: #A9A9A9; }
+                            Text { text: "⚠️ Failed"; color: #FFB86C; }
+                            Text { text: "🔒 Protected"; color: #55A0FF; }
+                            Text { text: "✔️ Deleted"; color: #55FF55; }
+
+                            Rectangle { vertical-stretch: 1; }
+
+                            HorizontalLayout { spacing: 5px; Rectangle { width: 15px; height: 15px; background: #D4D4D4; } Text { text: "Will not be touched"; vertical-alignment: center; color: #D4D4D4; } }
+                            HorizontalLayout { spacing: 5px; Rectangle { width: 15px; height: 15px; background: #FF5555; } Text { text: "Will be deleted"; vertical-alignment: center; color: #D4D4D4; } }
+                            HorizontalLayout { spacing: 5px; Rectangle { width: 15px; height: 15px; background: #55A0FF; } Text { text: "Protected"; vertical-alignment: center; color: #D4D4D4; } }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 15px;
+                    height: 20px;
+                    Text { text: "Total found: " + root.directories.length; vertical-alignment: center; }
+                    Text { text: "Empty/Deletable: " + root.empty_count; vertical-alignment: center; color: #FF5555; }
+                    Text { text: "Deleted: " + root.deleted_count; vertical-alignment: center; color: #55FF55; }
+                    Text { text: "Failed: " + root.failed_count; vertical-alignment: center; color: #FFB86C; }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    height: 20px;
+                    ProgressIndicator {
+                        progress: root.progress;
+                        width: 200px;
+                    }
+                    Text {
+                        text: root.status_msg;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    height: 35px;
+                    Button { text: "Search again"; clicked => { root.search_folders(); } enabled: !root.is_scanning && !root.is_deleting; }
+                    Button { text: "Delete matches"; clicked => { root.delete_folders(); } enabled: !root.is_scanning && !root.is_deleting && root.directories.length > 0; }
+                    Button { text: "Cancel"; clicked => { root.cancel_operation(); } enabled: root.is_scanning || root.is_deleting; }
+                    Button { text: "Show logs"; clicked => { root.active_tab = 5; } }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Exit"; clicked => { root.exit_app(); } }
+                }
+            }
+
+            // Settings
+            if root.active_tab == 1 : ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 20px;
+
+                    Text { text: "General options"; font-weight: 700; }
+                    CheckBox { text: "Directories with empty files will be considered empty"; checked <=> root.consider_empty_files_empty; }
+                    CheckBox { text: "Ignore hidden directories"; checked <=> root.ignore_hidden; }
+                    CheckBox { text: "Ignore errors during deletion"; checked <=> root.ignore_errors; }
+                    CheckBox { text: "Hide search errors (like access denied errors)"; checked <=> root.hide_search_errors; }
+
+                    Rectangle { height: 1px; background: #3e3e42; vertical-stretch: 0; }
+
+                    Text { text: "Delete mode"; font-weight: 700; }
+                    Text { text: "How should empty directories be deleted?"; }
+                    ComboBox {
+                        model: ["Delete to recycle bin and ignore errors (safer)", "Delete permanently"];
+                        current-index <=> root.delete_mode;
+                        height: 35px;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+
+            // Ignore list
+            if root.active_tab == 2 : VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Text { text: "When a directory name matches an item of this list it will be skipped."; }
+                TextEdit {
+                    text <=> root.ignore_list_text;
+                    vertical-stretch: 1;
+                }
+            }
+
+            // Advanced settings
+            if root.active_tab == 3 : ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 20px;
+
+                    Text { text: "Advanced settings"; font-weight: 700; }
+                    CheckBox { text: "Skip system directories (recommended)"; checked <=> root.skip_system; }
+
+                    HorizontalLayout {
+                        spacing: 20px;
+                        VerticalLayout {
+                            spacing: 10px;
+                            HorizontalLayout {
+                                Text { text: "Max directory nesting depth (-1 = infinite):"; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                SpinBox { value <=> root.max_depth; minimum: -1; width: 100px; height: 35px; }
+                            }
+                            HorizontalLayout {
+                                Text { text: "Pause between each deletion in ms:"; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                SpinBox { value <=> root.pause_ms; minimum: 0; width: 100px; height: 35px; }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 10px;
+                            HorizontalLayout {
+                                Text { text: "Skip folders less than N hours old:"; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                SpinBox { value <=> root.min_age_hours; minimum: 0; width: 100px; height: 35px; }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: #3e3e42; vertical-stretch: 0; }
+
+                    Text { text: "Filenames to ignore"; font-weight: 700; }
+                    TextEdit {
+                        text <=> root.ignore_files_text;
+                        height: 150px;
+                        vertical-stretch: 0;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+
+            // About
+            if root.active_tab == 4 : VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                alignment: center;
+                Text { text: "Remove Empty Directories (Rust/Slint Clone)"; font-size: 20px; font-weight: 700; horizontal-alignment: center; }
+                Text { text: "Refactored with Rust and Slint for cross-platform speed."; horizontal-alignment: center; }
+            }
+
+            // Log
+            if root.active_tab == 5 : VerticalLayout {
+                padding: 15px;
+                spacing: 10px;
+                TextEdit {
+                    text <=> root.log_text;
+                    read-only: true;
+                    vertical-stretch: 1;
+                }
+            }
+        }
+    }
+}
