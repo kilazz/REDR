@@ -1,0 +1,37 @@
+[package]
+name = "REDR"
+version = "1.0.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+mimalloc = "0.1.52"
+slint = { version = "1.17.1", features = ["unstable-winit-030"] }
+ignore = "0.4.29"
+rfd = "0.17.2"
+trash = "5.2.6"
+wildmatch = "2.6.1"
+clap = { version = "4.6.2", features = ["derive"] }
+rayon = "1.12.0"
+rustc-hash = "2.1.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+chrono = "0.4.45"
+ntfs-reader = "0.4.5"
+
+[build-dependencies]
+embed-resource = "3.0.11"
+slint-build = "1.17.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Security"] }
+winreg = "0.56.0"
+
+[profile.release]
+opt-level = 3
+#lto = "fat"
+#codegen-units = 1
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true

@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-msvc]
+# Configures Cargo to use LLVM's built-in fast LLD linker (rust-lld.exe)
+# instead of the standard Microsoft MSVC linker (link.exe).
+# This significantly accelerates link times, especially during incremental builds.
+linker = "rust-lld.exe"
