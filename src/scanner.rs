@@ -1,7 +1,6 @@
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use slint::SharedString;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wildmatch::WildMatch;
 
-/// Holds the configuration parameters for the directory scanner pipeline
 #[derive(Clone, Debug)]
 pub struct ScanSettings {
     pub ignore_files: Vec<String>,
@@ -19,16 +17,14 @@ pub struct ScanSettings {
     pub min_age_hours: u32,
     pub max_depth: i32,
     pub consider_empty_files_empty: bool,
-    /// If true, permission-denied and filesystem errors are collapsed into a single summary
     pub hide_search_errors: bool,
 }
 
-/// Represents a single filesystem node in the tree hierarchy
 #[derive(Clone, Debug)]
 pub struct DirectoryNode {
     pub path: Arc<Path>,
-    pub name: SharedString,
-    pub path_str: SharedString,
+    pub name: String,
+    pub path_str: String,
     pub depth: i32,
     pub status: i32, // 0: Normal, 1: Empty, 2: Deleted, 3: Protected, 4: Failed
     pub has_children: bool,
@@ -38,13 +34,95 @@ pub struct DirectoryNode {
     pub is_symlink: bool,
 }
 
-/// Messages emitted during the parallel file walk
-enum WalkMsg {
-    Entry(ignore::DirEntry),
-    Error(String),
+/// Advanced directory filtering supporting exact folder segment matching and wildcards
+#[derive(Clone, Debug)]
+pub struct DirFilter {
+    exact_names: FxHashSet<String>,
+    wildcards: Vec<WildMatch>,
 }
 
-/// Recursively climbs up the tree to mark all parent directories as included in the visible model
+impl DirFilter {
+    pub fn new(ignore_dirs: &[String]) -> Self {
+        let mut exact_names = FxHashSet::default();
+        let mut wildcards = Vec::new();
+
+        for s in ignore_dirs {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let s_normalized = trimmed.replace('\\', "/").to_lowercase();
+            // Patterns with wildcards or path separators use wildcard matching
+            if s_normalized.contains('*')
+                || s_normalized.contains('?')
+                || s_normalized.contains('/')
+            {
+                let pattern = if s_normalized.contains('*') || s_normalized.contains('?') {
+                    s_normalized
+                } else {
+                    format!("*{}*", s_normalized)
+                };
+                wildcards.push(WildMatch::new(&pattern));
+            } else {
+                // Exact directory names (e.g., ".git", "node_modules")
+                exact_names.insert(s_normalized);
+            }
+        }
+
+        Self {
+            exact_names,
+            wildcards,
+        }
+    }
+
+    /// Evaluates if a given path matches the ignore rules
+    pub fn is_match(&self, path: &Path, full_path_lower: &str) -> bool {
+        // 1. O(depth) exact segment matching (e.g. any path inside .git or node_modules)
+        if !self.exact_names.is_empty() {
+            for comp in path.components() {
+                let comp_str = comp.as_os_str().to_string_lossy().to_lowercase();
+                if self.exact_names.contains(&comp_str) {
+                    return true;
+                }
+            }
+        }
+
+        // 2. Fallback to path and wildcard patterns
+        if !self.wildcards.is_empty() && self.wildcards.iter().any(|m| m.matches(full_path_lower)) {
+            return true;
+        }
+
+        false
+    }
+}
+
+/// Helper to correctly identify directories, including Windows NTFS Junctions & Directory Symlinks
+fn is_entry_dir(ft: &fs::FileType) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        ft.is_dir() || ft.is_symlink_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        ft.is_dir()
+    }
+}
+
+struct DiscoveredDir {
+    path: Arc<Path>,
+    depth: i32,
+    is_young: bool,
+    is_hidden: bool,
+    is_symlink: bool,
+}
+
+struct WalkBatch {
+    dirs: Vec<DiscoveredDir>,
+    occupied_parents: FxHashSet<Arc<Path>>,
+    errors: Vec<String>,
+}
+
 fn add_ancestors(included: &mut FxHashSet<Arc<Path>>, start: &Path, root: &Path) {
     let mut parent = start.parent();
     while let Some(par) = parent {
@@ -58,94 +136,87 @@ fn add_ancestors(included: &mut FxHashSet<Arc<Path>>, start: &Path, root: &Path)
     }
 }
 
-/// Evaluates node relationships to set parent connection rendering flags
 fn compute_tree_relationships(nodes: &mut [DirectoryNode]) {
+    if nodes.is_empty() {
+        return;
+    }
+
     for i in 0..nodes.len() {
         if i + 1 < nodes.len() && nodes[i + 1].depth > nodes[i].depth {
             nodes[i].has_children = true;
         }
+    }
 
-        let mut last = true;
-        for j in (i + 1)..nodes.len() {
-            if nodes[j].depth < nodes[i].depth {
-                break;
-            }
-            if nodes[j].depth == nodes[i].depth {
-                last = false;
-                break;
-            }
+    let mut seen_depths: FxHashSet<i32> = FxHashSet::default();
+    let mut prev_depth = i32::MAX;
+
+    for i in (0..nodes.len()).rev() {
+        let depth = nodes[i].depth;
+        if depth < prev_depth {
+            seen_depths.retain(|&d| d <= depth);
         }
-        nodes[i].is_last_sibling = last;
+
+        nodes[i].is_last_sibling = seen_depths.insert(depth);
+
+        prev_depth = depth;
     }
 }
 
-/// Detects the Windows-specific "System" file attribute
 #[cfg(windows)]
-fn is_system_dir(path: &Path) -> bool {
+fn is_system_metadata(meta: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-    fs::metadata(path)
-        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_SYSTEM != 0)
-        .unwrap_or(false)
+    meta.file_attributes() & FILE_ATTRIBUTE_SYSTEM != 0
 }
 
 #[cfg(not(windows))]
-fn is_system_dir(_path: &Path) -> bool {
+fn is_system_metadata(_meta: &fs::Metadata) -> bool {
     false
 }
 
-/// Identifies hidden directories natively on Windows or via dotfile naming on Unix
 #[cfg(windows)]
-fn is_hidden_dir(path: &Path, name: &str) -> bool {
+fn is_hidden_metadata(meta: &fs::Metadata, name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-    fs::metadata(path)
-        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
-        .unwrap_or(false)
+    meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
 }
 
 #[cfg(not(windows))]
-fn is_hidden_dir(_path: &Path, name: &str) -> bool {
+fn is_hidden_metadata(_meta: &fs::Metadata, name: &str) -> bool {
     name.starts_with('.')
 }
 
-/// Determines if a directory is too young to be processed based on age threshold
-fn is_dir_too_young(p: &Path, min_age_hours: u32) -> bool {
+fn is_metadata_too_young(meta: &fs::Metadata, min_age_hours: u32) -> bool {
     if min_age_hours == 0 {
         return false;
     }
-    fs::metadata(p)
+    meta.created()
+        .or_else(|_| meta.modified())
         .ok()
-        .and_then(|m| m.created().or_else(|_| m.modified()).ok())
         .and_then(|t| t.elapsed().ok())
         .map(|e| e.as_secs() < (min_age_hours as u64 * 3600))
         .unwrap_or(false)
 }
 
-/// Assesses whether a directory qualifies for preservation under configured protection policies
 fn is_directory_protected(
     p: &Path,
     is_hidden: bool,
     is_young_dir: bool,
+    is_system: bool,
     settings: &ScanSettings,
-    dir_matchers: &[WildMatch],
+    dir_filter: &DirFilter,
 ) -> bool {
-    let matches_ignore_dir = if dir_matchers.is_empty() {
-        false
-    } else {
-        let full_path_lower = p.to_string_lossy().replace('\\', "/").to_lowercase();
-        dir_matchers.iter().any(|m| m.matches(&full_path_lower))
-    };
+    let full_path_lower = p.to_string_lossy().replace('\\', "/").to_lowercase();
+    let matches_ignore_dir = dir_filter.is_match(p, &full_path_lower);
     let matches_hidden = settings.ignore_hidden && is_hidden;
-    let matches_system = settings.keep_system && is_system_dir(p);
+    let matches_system = settings.keep_system && is_system;
 
     matches_ignore_dir || matches_hidden || matches_system || is_young_dir
 }
 
-/// Standard file walk scanner powered by WalkBuilder and parallel Rayon processing
 pub fn scan_empty_dirs(
     root: &Path,
     settings: &ScanSettings,
@@ -158,20 +229,7 @@ pub fn scan_empty_dirs(
         .map(|s| WildMatch::new(s))
         .collect();
 
-    let dir_matchers: Vec<WildMatch> = settings
-        .ignore_dirs
-        .iter()
-        .map(|s| {
-            let s_normalized = s.replace('\\', "/").to_lowercase();
-            let pattern = if s_normalized.contains('*') || s_normalized.contains('?') {
-                s_normalized
-            } else {
-                format!("*{}*", s_normalized)
-            };
-            WildMatch::new(&pattern)
-        })
-        .collect();
-
+    let dir_filter = DirFilter::new(&settings.ignore_dirs);
     let root_depth = root.components().count() as i32;
 
     let mut builder = WalkBuilder::new(root);
@@ -182,35 +240,99 @@ pub fn scan_empty_dirs(
         .git_exclude(false)
         .git_global(false);
 
-    let (tx, rx) = std::sync::mpsc::channel::<WalkMsg>();
+    let (tx, rx) = std::sync::mpsc::channel::<WalkBatch>();
     let cancel_walk = cancel_flag.clone();
+    let file_matchers_ref = &file_matchers;
+    let settings_ref = settings;
+
     builder.build_parallel().run(|| {
         let tx = tx.clone();
         let cancel_inner = cancel_walk.clone();
+        let mut batch = WalkBatch {
+            dirs: Vec::with_capacity(512),
+            occupied_parents: FxHashSet::default(),
+            errors: Vec::new(),
+        };
+
         Box::new(move |result| {
             if cancel_inner.load(Ordering::Relaxed) {
                 return ignore::WalkState::Quit;
             }
+
             match result {
                 Ok(entry) => {
-                    let _ = tx.send(WalkMsg::Entry(entry));
+                    let p = Arc::<Path>::from(entry.path());
+                    let depth = entry.depth() as i32;
+                    let file_type = entry.file_type();
+                    let file_name = entry.file_name().to_string_lossy();
+
+                    let is_dir = file_type.as_ref().map(is_entry_dir).unwrap_or(false);
+                    let is_symlink = file_type
+                        .as_ref()
+                        .map(|ft| ft.is_symlink())
+                        .unwrap_or(false);
+                    let meta = entry.metadata().ok();
+
+                    if is_dir {
+                        let is_hidden = meta
+                            .as_ref()
+                            .map(|m| is_hidden_metadata(m, &file_name))
+                            .unwrap_or_else(|| file_name.starts_with('.'));
+                        let is_young = meta
+                            .as_ref()
+                            .map(|m| is_metadata_too_young(m, settings_ref.min_age_hours))
+                            .unwrap_or(false);
+
+                        batch.dirs.push(DiscoveredDir {
+                            path: p,
+                            depth,
+                            is_young,
+                            is_hidden,
+                            is_symlink,
+                        });
+                    } else {
+                        let is_ignored = file_matchers_ref.iter().any(|m| m.matches(&file_name));
+                        let is_empty_file = settings_ref.consider_empty_files_empty
+                            && meta.as_ref().map(|m| m.len() == 0).unwrap_or(false);
+
+                        if !is_ignored
+                            && !is_empty_file
+                            && let Some(parent) = p.parent()
+                        {
+                            batch.occupied_parents.insert(Arc::<Path>::from(parent));
+                        }
+                    }
                 }
                 Err(err) => {
-                    let _ = tx.send(WalkMsg::Error(err.to_string()));
+                    batch.errors.push(err.to_string());
                 }
             }
+
+            if batch.dirs.len() >= 512 || batch.occupied_parents.len() >= 512 {
+                let send_batch = std::mem::replace(
+                    &mut batch,
+                    WalkBatch {
+                        dirs: Vec::with_capacity(512),
+                        occupied_parents: FxHashSet::default(),
+                        errors: Vec::new(),
+                    },
+                );
+                let _ = tx.send(send_batch);
+            }
+
             ignore::WalkState::Continue
         })
     });
     drop(tx);
 
-    let mut entries: Vec<ignore::DirEntry> = Vec::new();
+    let mut dir_states: Vec<DiscoveredDir> = Vec::new();
+    let mut occupied_parents: FxHashSet<Arc<Path>> = FxHashSet::default();
     let mut walk_errors: Vec<String> = Vec::new();
-    for msg in rx {
-        match msg {
-            WalkMsg::Entry(e) => entries.push(e),
-            WalkMsg::Error(e) => walk_errors.push(e),
-        }
+
+    for mut batch in rx {
+        dir_states.append(&mut batch.dirs);
+        occupied_parents.extend(batch.occupied_parents);
+        walk_errors.append(&mut batch.errors);
     }
 
     if cancel_flag.load(Ordering::Relaxed) {
@@ -230,73 +352,7 @@ pub fn scan_empty_dirs(
         }
     }
 
-    let file_matchers_ref = &file_matchers;
-    let settings_ref = settings;
-
-    // Split processing of dirs vs files to drastically reduce memory usage
-    let (mut dir_states, occupied_parents) = entries
-        .into_par_iter()
-        .fold(
-            || (Vec::new(), FxHashSet::default()),
-            |(mut dirs, mut occupied), entry| {
-                let p = Arc::<Path>::from(entry.path());
-                let depth = entry.depth();
-                let file_type = entry.file_type();
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-
-                let is_dir = file_type.as_ref().map(|ft| ft.is_dir()).unwrap_or(false);
-                let is_file = file_type.as_ref().map(|ft| ft.is_file()).unwrap_or(false);
-
-                let is_hidden = is_hidden_dir(&p, &file_name);
-                let is_symlink =
-                    file_type
-                        .as_ref()
-                        .map(|ft| ft.is_symlink())
-                        .unwrap_or_else(|| {
-                            fs::symlink_metadata(&p)
-                                .map(|m| m.file_type().is_symlink())
-                                .unwrap_or(false)
-                        });
-
-                if is_dir {
-                    let is_young_dir = if settings_ref.min_age_hours > 0 {
-                        is_dir_too_young(&p, settings_ref.min_age_hours)
-                    } else {
-                        false
-                    };
-                    dirs.push((p, depth, file_name, is_young_dir, is_hidden, is_symlink));
-                } else {
-                    let is_ignored = file_matchers_ref.iter().any(|m| m.matches(&file_name));
-
-                    // Use cached metadata from WalkBuilder (DirEntry) instead of fs::metadata
-                    let is_empty_file = if is_file && settings_ref.consider_empty_files_empty {
-                        entry.metadata().map(|m| m.len() == 0).unwrap_or(false)
-                    } else {
-                        false
-                    };
-
-                    if !is_ignored
-                        && !is_empty_file
-                        && let Some(parent) = p.parent()
-                    {
-                        occupied.insert(Arc::<Path>::from(parent));
-                    }
-                }
-
-                (dirs, occupied)
-            },
-        )
-        .reduce(
-            || (Vec::new(), FxHashSet::default()),
-            |(mut d1, mut o1), (mut d2, o2)| {
-                d1.append(&mut d2);
-                o1.extend(o2);
-                (d1, o1)
-            },
-        );
-
-    // Sort bottom-up so lower child nodes are analyzed first
-    dir_states.sort_by_key(|(_, d, _, _, _, _)| std::cmp::Reverse(*d));
+    dir_states.sort_by_key(|d| std::cmp::Reverse(d.depth));
 
     let mut dir_status: FxHashMap<Arc<Path>, bool> = FxHashMap::default();
     let mut included_dirs: FxHashSet<Arc<Path>> = FxHashSet::default();
@@ -305,55 +361,67 @@ pub fn scan_empty_dirs(
     let mut hidden_dirs: FxHashSet<Arc<Path>> = FxHashSet::default();
     let mut symlink_dirs: FxHashSet<Arc<Path>> = FxHashSet::default();
 
-    // Mark directory branches containing active files as non-empty from the start
     for parent in occupied_parents {
         dir_status.insert(parent, false);
     }
 
-    for (p, depth, _child_name, is_young_dir, is_hidden, is_symlink) in dir_states {
+    for dir in dir_states {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err("Operation cancelled by user".to_string());
         }
 
-        if settings.max_depth >= 0 && (depth as i32) > settings.max_depth {
-            if let Some(parent) = p.parent() {
+        if settings.max_depth >= 0 && dir.depth > settings.max_depth {
+            if let Some(parent) = dir.path.parent() {
                 dir_status.insert(Arc::from(parent), false);
             }
             continue;
         }
 
-        let mut is_empty = *dir_status.get(&p).unwrap_or(&true);
+        let mut is_empty = *dir_status.get(&dir.path).unwrap_or(&true);
         let mut is_protected = false;
 
-        if is_hidden {
-            hidden_dirs.insert(p.clone());
+        if dir.is_hidden {
+            hidden_dirs.insert(dir.path.clone());
         }
-        if is_symlink {
-            symlink_dirs.insert(p.clone());
+        if dir.is_symlink {
+            symlink_dirs.insert(dir.path.clone());
         }
 
-        if is_empty && is_directory_protected(&p, is_hidden, is_young_dir, settings, &dir_matchers)
+        let is_system = fs::metadata(&dir.path)
+            .as_ref()
+            .map(is_system_metadata)
+            .unwrap_or(false);
+
+        if is_empty
+            && is_directory_protected(
+                &dir.path,
+                dir.is_hidden,
+                dir.is_young,
+                is_system,
+                settings,
+                &dir_filter,
+            )
         {
             is_empty = false;
             is_protected = true;
         }
 
-        dir_status.insert(p.clone(), is_empty);
+        dir_status.insert(dir.path.clone(), is_empty);
 
-        if p.as_ref() != root {
+        if dir.path.as_ref() != root {
             if is_empty {
-                empty_dirs_found.insert(p.clone());
-                included_dirs.insert(p.clone());
-                add_ancestors(&mut included_dirs, &p, root);
+                empty_dirs_found.insert(dir.path.clone());
+                included_dirs.insert(dir.path.clone());
+                add_ancestors(&mut included_dirs, &dir.path, root);
             } else {
-                if let Some(parent) = p.parent() {
+                if let Some(parent) = dir.path.parent() {
                     dir_status.insert(Arc::from(parent), false);
                 }
 
                 if is_protected {
-                    protected_dirs.insert(p.clone());
-                    included_dirs.insert(p.clone());
-                    add_ancestors(&mut included_dirs, &p, root);
+                    protected_dirs.insert(dir.path.clone());
+                    included_dirs.insert(dir.path.clone());
+                    add_ancestors(&mut included_dirs, &dir.path, root);
                 }
             }
         }
@@ -362,7 +430,7 @@ pub fn scan_empty_dirs(
     let mut sorted_paths: Vec<Arc<Path>> = included_dirs.into_iter().collect();
     sorted_paths.sort();
 
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(sorted_paths.len());
     for p in sorted_paths {
         let is_empty = empty_dirs_found.contains(&p);
         let is_protected = protected_dirs.contains(&p);
@@ -378,8 +446,8 @@ pub fn scan_empty_dirs(
 
         result.push(DirectoryNode {
             path: p.clone(),
-            name: SharedString::from(name),
-            path_str: SharedString::from(p.to_string_lossy().into_owned()),
+            name,
+            path_str: p.to_string_lossy().into_owned(),
             depth,
             status: if is_empty {
                 1
@@ -397,13 +465,9 @@ pub fn scan_empty_dirs(
     }
 
     compute_tree_relationships(&mut result);
-
     Ok(result)
 }
 
-// ==========================================
-// EXPERIMENTAL WINDOWS NTFS DIRECT MFT SCAN
-// ==========================================
 #[cfg(target_os = "windows")]
 pub fn scan_empty_dirs_mft(
     root: &Path,
@@ -424,24 +488,10 @@ pub fn scan_empty_dirs_mft(
         .map(|s| WildMatch::new(s))
         .collect();
 
-    let dir_matchers: Vec<WildMatch> = settings
-        .ignore_dirs
-        .iter()
-        .map(|s| {
-            let s_normalized = s.replace('\\', "/").to_lowercase();
-            let pattern = if s_normalized.contains('*') || s_normalized.contains('?') {
-                s_normalized
-            } else {
-                format!("*{}*", s_normalized)
-            };
-            WildMatch::new(&pattern)
-        })
-        .collect();
-
+    let dir_filter = DirFilter::new(&settings.ignore_dirs);
     let canonical_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     let mut drive_letter_opt = None;
-
     if let Some(Component::Prefix(prefix_component)) = canonical_path.components().next() {
         use std::path::Prefix;
         match prefix_component.kind() {
@@ -452,9 +502,7 @@ pub fn scan_empty_dirs_mft(
                 return Err("Direct MFT Scan is not supported on network UNC shares.".to_string());
             }
             Prefix::DeviceNS(_) | Prefix::Verbatim(_) => {
-                return Err(
-                    "Direct MFT Scan is not supported on this type of device volume.".to_string(),
-                );
+                return Err("Direct MFT Scan is not supported on device volumes.".to_string());
             }
         }
     }
@@ -470,16 +518,15 @@ pub fn scan_empty_dirs_mft(
 
     if drive_letter.len() != 1 || !drive_letter.chars().next().unwrap().is_ascii_alphabetic() {
         return Err(format!(
-            "Invalid drive letter extracted: '{}'. Direct MFT Scan requires a local disk drive (e.g., C:).",
+            "Invalid drive letter: '{}'. Direct MFT Scan requires a local drive (e.g., C:).",
             drive_letter
         ));
     }
 
     let volume_path = format!("\\\\.\\{}:", drive_letter);
-
     let volume = Volume::new(&volume_path).map_err(|e| {
         format!(
-            "Failed to open physical NTFS volume (Requires Administrator privileges): {}",
+            "Failed to open NTFS volume (Requires Administrator privileges): {}",
             e
         )
     })?;
@@ -487,7 +534,7 @@ pub fn scan_empty_dirs_mft(
     let mft = Mft::new(volume)
         .map_err(|e| format!("Failed to initialize Master File Table parser: {}", e))?;
 
-    log("[*] Reading Master File Table directly into system memory...");
+    log("[*] Reading Master File Table records...");
 
     let lowercase_path = |path: &Path| -> String {
         let s = path.to_string_lossy().to_lowercase();
@@ -499,9 +546,21 @@ pub fn scan_empty_dirs_mft(
     };
 
     let root_lower_str = lowercase_path(root);
-
     let mut all_dirs: FxHashMap<String, PathBuf> = FxHashMap::default();
     let mut occupied_dirs: FxHashSet<String> = FxHashSet::default();
+
+    // Fast boundary check ensuring paths belong strictly within root scope
+    let is_within_root = |p: &str| -> bool {
+        if p == root_lower_str {
+            true
+        } else if root_lower_str.ends_with('\\') {
+            p.starts_with(&root_lower_str)
+        } else {
+            p.len() > root_lower_str.len()
+                && p.as_bytes()[root_lower_str.len()] == b'\\'
+                && p.starts_with(&root_lower_str)
+        }
+    };
 
     for file in mft.files() {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -509,43 +568,35 @@ pub fn scan_empty_dirs_mft(
         }
 
         let info = FileInfo::new(&mft, &file);
-        let raw_path = info.path.clone();
-        let raw_str = raw_path.to_string_lossy();
+        let raw_path = info.path;
 
-        let path_with_drive = if raw_str.starts_with('\\') && !raw_str.starts_with("\\\\.\\") {
-            let clean_path = raw_path.strip_prefix("\\").unwrap_or(&raw_path);
-            PathBuf::from(format!("{}:\\", drive_letter)).join(clean_path)
-        } else if !raw_str.contains(':') {
-            PathBuf::from(format!("{}:\\", drive_letter)).join(&raw_path)
+        let path_with_drive = if raw_path.starts_with(format!("{}:\\", drive_letter)) {
+            raw_path
         } else {
-            raw_path.clone()
+            let clean = raw_path.strip_prefix("\\").unwrap_or(&raw_path);
+            PathBuf::from(format!("{}:\\", drive_letter)).join(clean)
         };
 
-        let path_str = path_with_drive.to_string_lossy();
-        let target_prefix = format!("{}:\\", drive_letter);
-        let target_lower = target_prefix.to_lowercase();
-        let path_lower = path_str.to_lowercase();
+        let p_lower = lowercase_path(&path_with_drive);
 
-        let p = if let Some(pos) = path_lower.find(&target_lower) {
-            PathBuf::from(&path_str[pos..])
-        } else {
-            path_with_drive
-        };
-
-        let p_lower = lowercase_path(&p);
+        // Skip any records lying completely outside the requested root
+        if !is_within_root(&p_lower) {
+            continue;
+        }
 
         if info.is_directory {
-            all_dirs.insert(p_lower, p.clone());
+            all_dirs.insert(p_lower, path_with_drive);
         } else {
-            let child_name = p.file_name().unwrap_or_default().to_string_lossy();
+            let child_name = path_with_drive
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
             let is_ignored = file_matchers.iter().any(|m| m.matches(&child_name));
 
             if !is_ignored {
                 let mut current_path: &str = &p_lower;
-
                 while let Some(idx) = current_path.rfind('\\') {
                     let mut parent_path = &current_path[..idx];
-
                     if parent_path.ends_with(':') {
                         parent_path = &current_path[..idx + 1];
                     }
@@ -553,10 +604,9 @@ pub fn scan_empty_dirs_mft(
                     if parent_path.is_empty() || occupied_dirs.contains(parent_path) {
                         break;
                     }
-
                     occupied_dirs.insert(parent_path.to_string());
 
-                    if parent_path.ends_with(":\\") {
+                    if parent_path == root_lower_str || parent_path.ends_with(":\\") {
                         break;
                     }
                     current_path = parent_path;
@@ -565,17 +615,14 @@ pub fn scan_empty_dirs_mft(
         }
     }
 
-    log("[*] Reconstructing hierarchical tree paths and filtering occupied branches...");
-
     let mut empty_dirs_found: FxHashSet<String> = FxHashSet::default();
     let mut included_dirs: FxHashSet<PathBuf> = FxHashSet::default();
     let root_depth = root.components().count() as i32;
 
     included_dirs.insert(root.to_path_buf());
-
-    if !all_dirs.contains_key(&root_lower_str) {
-        all_dirs.insert(root_lower_str.clone(), root.to_path_buf());
-    }
+    all_dirs
+        .entry(root_lower_str.clone())
+        .or_insert_with(|| root.to_path_buf());
 
     for (p_lower, p) in &all_dirs {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -592,7 +639,6 @@ pub fn scan_empty_dirs_mft(
             let mut current_path: &str = p_lower;
             while let Some(idx) = current_path.rfind('\\') {
                 let mut parent_path = &current_path[..idx];
-
                 if parent_path.ends_with(':') {
                     parent_path = &current_path[..idx + 1];
                 }
@@ -605,10 +651,8 @@ pub fn scan_empty_dirs_mft(
                     if !included_dirs.insert(exact_parent.clone()) {
                         break;
                     }
-                } else {
-                    if !included_dirs.insert(PathBuf::from(parent_path)) {
-                        break;
-                    }
+                } else if !included_dirs.insert(PathBuf::from(parent_path)) {
+                    break;
                 }
 
                 if parent_path.ends_with(":\\") {
@@ -619,27 +663,14 @@ pub fn scan_empty_dirs_mft(
         }
     }
 
-    log("[*] Performing hybrid accuracy check to eliminate MFT false positives...");
+    log("[*] Verifying MFT directory states...");
 
     let mut true_empty: FxHashSet<String> = FxHashSet::default();
-    let mut false_positives: FxHashSet<String> = FxHashSet::default();
-
     let mut empty_vec: Vec<String> = empty_dirs_found.into_iter().collect();
     empty_vec.sort_by_key(|p| std::cmp::Reverse(p.matches('\\').count()));
 
     for p_lower in empty_vec {
         if let Some(exact_p) = all_dirs.get(&p_lower) {
-            if false_positives.contains(&p_lower) {
-                if let Some(idx) = p_lower.rfind('\\') {
-                    let mut parent = &p_lower[..idx];
-                    if parent.ends_with(':') {
-                        parent = &p_lower[..idx + 1];
-                    }
-                    false_positives.insert(parent.to_string());
-                }
-                continue;
-            }
-
             let mut is_truly_empty = true;
             if let Ok(entries) = fs::read_dir(exact_p) {
                 for entry in entries.flatten() {
@@ -654,11 +685,8 @@ pub fn scan_empty_dirs_mft(
                         }
                     } else {
                         let is_ignored = file_matchers.iter().any(|m| m.matches(&child_name));
-                        let is_empty_file = if settings.consider_empty_files_empty {
-                            entry.metadata().map(|m| m.len() == 0).unwrap_or(false)
-                        } else {
-                            false
-                        };
+                        let is_empty_file = settings.consider_empty_files_empty
+                            && entry.metadata().map(|m| m.len() == 0).unwrap_or(false);
 
                         if !is_ignored && !is_empty_file {
                             is_truly_empty = false;
@@ -671,16 +699,7 @@ pub fn scan_empty_dirs_mft(
             }
 
             if is_truly_empty {
-                true_empty.insert(p_lower.clone());
-            } else {
-                false_positives.insert(p_lower.clone());
-                if let Some(idx) = p_lower.rfind('\\') {
-                    let mut parent = &p_lower[..idx];
-                    if parent.ends_with(':') {
-                        parent = &p_lower[..idx + 1];
-                    }
-                    false_positives.insert(parent.to_string());
-                }
+                true_empty.insert(p_lower);
             }
         }
     }
@@ -688,12 +707,10 @@ pub fn scan_empty_dirs_mft(
     let mut sorted_paths: Vec<PathBuf> = included_dirs.into_iter().collect();
     sorted_paths.sort();
 
-    let mut result = Vec::new();
-
+    let mut result = Vec::with_capacity(sorted_paths.len());
     for p in sorted_paths {
         let p_lower = lowercase_path(&p);
         let mut is_empty = true_empty.contains(&p_lower);
-
         let depth = (p.components().count() as i32) - root_depth;
         let name = p
             .file_name()
@@ -701,21 +718,23 @@ pub fn scan_empty_dirs_mft(
             .to_string_lossy()
             .into_owned();
 
-        let is_hidden = is_hidden_dir(&p, &name);
+        let meta = fs::metadata(&p).ok();
+        let is_hidden = meta
+            .as_ref()
+            .map(|m| is_hidden_metadata(m, &name))
+            .unwrap_or(false);
+        let is_system = meta.as_ref().map(is_system_metadata).unwrap_or(false);
+        let is_young = meta
+            .as_ref()
+            .map(|m| is_metadata_too_young(m, settings.min_age_hours))
+            .unwrap_or(false);
         let is_symlink = fs::symlink_metadata(&p)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
 
         let mut is_protected = false;
-
         if is_empty
-            && is_directory_protected(
-                &p,
-                is_hidden,
-                is_dir_too_young(&p, settings.min_age_hours),
-                settings,
-                &dir_matchers,
-            )
+            && is_directory_protected(&p, is_hidden, is_young, is_system, settings, &dir_filter)
         {
             is_empty = false;
             is_protected = true;
@@ -723,12 +742,12 @@ pub fn scan_empty_dirs_mft(
 
         result.push(DirectoryNode {
             path: Arc::from(p.clone()),
-            name: SharedString::from(if p.as_path() == root {
+            name: if p.as_path() == root {
                 root.to_string_lossy().into_owned()
             } else {
                 name
-            }),
-            path_str: SharedString::from(p.to_string_lossy().into_owned()),
+            },
+            path_str: p.to_string_lossy().into_owned(),
             depth,
             status: if is_empty {
                 1
@@ -746,9 +765,8 @@ pub fn scan_empty_dirs_mft(
     }
 
     compute_tree_relationships(&mut result);
-
     log(&format!(
-        "[+] Direct MFT Scan complete. Found {} truly empty directories.",
+        "[+] Direct MFT Scan complete. Found {} empty directories.",
         true_empty.len()
     ));
 
@@ -765,46 +783,76 @@ pub struct DeleteSettings {
     pub dry_run: bool,
 }
 
-fn clean_and_verify_empty(
+fn verify_subtree_empty(
     dir: &Path,
     settings: &DeleteSettings,
     file_matchers: &[WildMatch],
-) -> Result<bool, String> {
-    let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
-    if meta.is_symlink() {
-        return Ok(true);
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+
+    for entry in entries.flatten() {
+        let child_path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+
+        let is_dir = is_entry_dir(&file_type);
+
+        if is_dir {
+            if !file_type.is_symlink() {
+                verify_subtree_empty(&child_path, settings, file_matchers)?;
+            }
+        } else {
+            let child_name = child_path.file_name().unwrap_or_default().to_string_lossy();
+            let is_ignored = file_matchers.iter().any(|m| m.matches(&child_name));
+            let is_empty_file = settings.consider_empty_files_empty
+                && entry.metadata().map(|m| m.len() == 0).unwrap_or(false);
+
+            if !is_ignored && !is_empty_file {
+                return Err(format!(
+                    "Subtree contains non-empty file: {}",
+                    child_path.display()
+                ));
+            }
+        }
     }
+    Ok(())
+}
 
+fn clean_leaf_dir_files(
+    dir: &Path,
+    settings: &DeleteSettings,
+    file_matchers: &[WildMatch],
+) -> Result<(), String> {
     if let Ok(entries) = fs::read_dir(dir) {
-        for child in entries.flatten() {
-            let cp = child.path();
-            let meta = fs::symlink_metadata(&cp);
-            let is_symlink = meta.as_ref().map(|m| m.is_symlink()).unwrap_or(false);
+        for entry in entries.flatten() {
+            let cp = entry.path();
+            let ft = entry.file_type().map_err(|e| e.to_string())?;
 
-            if is_symlink || cp.is_file() {
-                let child_name = cp.file_name().unwrap_or_default().to_string_lossy();
-                let is_ignored = file_matchers.iter().any(|m| m.matches(&child_name));
-                let is_empty_file = !is_symlink
-                    && settings.consider_empty_files_empty
-                    && fs::metadata(&cp).map(|m| m.len() == 0).unwrap_or(false);
+            let is_dir = is_entry_dir(&ft);
 
-                if (is_ignored || is_empty_file) && !settings.dry_run {
-                    let _ = fs::remove_file(&cp).or_else(|_| fs::remove_dir(&cp));
+            if !is_dir {
+                let name = cp.file_name().unwrap_or_default().to_string_lossy();
+                let is_ignored = file_matchers.iter().any(|m| m.matches(&name));
+                let is_empty = settings.consider_empty_files_empty
+                    && entry.metadata().map(|m| m.len() == 0).unwrap_or(false);
+
+                if (is_ignored || is_empty) && !settings.dry_run {
+                    #[cfg(windows)]
+                    {
+                        if let Ok(meta) = fs::metadata(&cp) {
+                            let mut perms = meta.permissions();
+                            if perms.readonly() {
+                                #[allow(clippy::permissions_set_readonly_false)]
+                                perms.set_readonly(false);
+                                let _ = fs::set_permissions(&cp, perms);
+                            }
+                        }
+                    }
+                    let _ = fs::remove_file(&cp);
                 }
             }
         }
     }
-
-    match fs::read_dir(dir) {
-        Ok(mut entries) => {
-            if entries.next().is_none() {
-                Ok(true)
-            } else {
-                Err("Directory is not empty (contains non-ignored files)".to_string())
-            }
-        }
-        Err(e) => Err(format!("Failed to verify directory: {}", e)),
-    }
+    Ok(())
 }
 
 fn perform_directory_delete(
@@ -812,23 +860,29 @@ fn perform_directory_delete(
     settings: &DeleteSettings,
     file_matchers: &[WildMatch],
 ) -> Result<(), String> {
-    match clean_and_verify_empty(dir, settings, file_matchers) {
-        Ok(true) => {
-            let meta = fs::symlink_metadata(dir);
-            let is_symlink = meta.map(|m| m.is_symlink()).unwrap_or(false);
+    let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+    let is_symlink = meta.is_symlink();
 
-            if settings.move_to_trash && !is_symlink {
-                trash::delete(dir).map_err(|e| e.to_string())
-            } else if is_symlink {
-                fs::remove_dir(dir)
-                    .or_else(|_| fs::remove_file(dir))
-                    .map_err(|e| e.to_string())
-            } else {
-                fs::remove_dir(dir).map_err(|e| e.to_string())
-            }
-        }
-        Ok(false) => Err("Directory is not empty (contains non-ignored files)".to_string()),
-        Err(e) => Err(e),
+    if is_symlink {
+        return if settings.dry_run {
+            Ok(())
+        } else {
+            fs::remove_dir(dir)
+                .or_else(|_| fs::remove_file(dir))
+                .map_err(|e| e.to_string())
+        };
+    }
+
+    clean_leaf_dir_files(dir, settings, file_matchers)?;
+
+    if settings.dry_run {
+        return Ok(());
+    }
+
+    if settings.move_to_trash {
+        trash::delete(dir).map_err(|e| e.to_string())
+    } else {
+        fs::remove_dir(dir).map_err(|e| e.to_string())
     }
 }
 
@@ -863,7 +917,6 @@ where
     let mut covered_paths_set: FxHashSet<PathBuf> = FxHashSet::default();
     let mut covered_paths: Vec<PathBuf> = Vec::new();
 
-    // O(N * D) instead of O(N^2) using FxHashSet for ancestor lookup
     for &i in &empty_indices {
         let path = &nodes[i].path;
         let mut is_covered = false;
@@ -894,29 +947,29 @@ where
 
     if settings.move_to_trash && !settings.dry_run && settings.pause_ms == 0 {
         log(
-            "[*] Attempting batch deletion to Recycle Bin (Root-Chop)...",
+            "[*] Verifying subtree integrity for batch Recycle Bin deletion...",
             0,
             0,
         );
 
-        let mut verification_failed = false;
+        let mut subtree_valid = true;
         for &i in &root_delete_targets {
-            if let Err(e) = clean_and_verify_empty(&nodes[i].path, settings, &file_matchers) {
+            if let Err(e) = verify_subtree_empty(&nodes[i].path, settings, &file_matchers) {
                 log(
                     &format!(
-                        "[!] Verification failed for {}: {}",
+                        "[!] Cannot batch recycle {}: {}",
                         nodes[i].path.display(),
                         e
                     ),
                     i,
                     4,
                 );
-                verification_failed = true;
+                subtree_valid = false;
                 break;
             }
         }
 
-        if !verification_failed {
+        if subtree_valid {
             match trash::delete_all(&covered_paths) {
                 Ok(_) => {
                     for (progress_idx, &i) in empty_indices.iter().enumerate() {
@@ -934,7 +987,7 @@ where
                 Err(err) => {
                     log(
                         &format!(
-                            "[!] Batch Recycle Bin deletion failed: {}. Falling back to safe bottom-up...",
+                            "[!] Batch recycling failed: {}. Falling back to bottom-up deletion...",
                             err
                         ),
                         0,
@@ -948,13 +1001,10 @@ where
     if !batch_success {
         let mut processed_items = 0;
         let mut depths: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-        let mut total_items = 0;
+        let total_items = empty_indices.len();
 
-        for (i, node) in nodes.iter().enumerate() {
-            if node.status == 1 {
-                depths.entry(node.depth).or_default().push(i);
-                total_items += 1;
-            }
+        for &i in &empty_indices {
+            depths.entry(nodes[i].depth).or_default().push(i);
         }
 
         for (_depth, indices) in depths.into_iter().rev() {
@@ -962,7 +1012,7 @@ where
                 break;
             }
 
-            if settings.pause_ms == 0 && indices.len() > 1 {
+            if !settings.move_to_trash && settings.pause_ms == 0 && indices.len() > 1 {
                 let results: Vec<_> = {
                     let nodes_ref: &[DirectoryNode] = nodes;
                     let cancel_inner = cancel_flag.clone();
@@ -970,34 +1020,29 @@ where
                         .par_iter()
                         .map(|&i| {
                             if cancel_inner.load(Ordering::Relaxed) {
-                                return (i, 4, "Cancelled".to_string(), None);
+                                return (i, 4, "Cancelled".to_string());
                             }
                             let dir = &nodes_ref[i].path;
-
                             if settings.dry_run {
                                 return (
                                     i,
                                     2,
                                     format!("[Dry-Run] Would delete: {}", dir.display()),
-                                    None,
                                 );
                             }
 
                             match perform_directory_delete(dir, settings, &file_matchers) {
-                                Ok(_) => (i, 2, format!("Deleted: {}", dir.display()), None),
-                                Err(e) => (
-                                    i,
-                                    4,
-                                    format!("Failed to delete {}: {}", dir.display(), e),
-                                    Some(e),
-                                ),
+                                Ok(_) => (i, 2, format!("Deleted: {}", dir.display())),
+                                Err(e) => {
+                                    (i, 4, format!("Failed to delete {}: {}", dir.display(), e))
+                                }
                             }
                         })
                         .collect()
                 };
 
                 let mut abort = false;
-                for (i, status, msg, _err) in results {
+                for (i, status, msg) in results {
                     if cancel_flag.load(Ordering::Relaxed) {
                         abort = true;
                         break;

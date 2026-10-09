@@ -1,10 +1,15 @@
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
 /// Complete persistent configuration struct mapped to settings.json
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct AppSettings {
+    pub version: u32,
     pub consider_empty_files_empty: bool,
     pub ignore_hidden: bool,
     pub ignore_errors: bool,
@@ -24,6 +29,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            version: CURRENT_CONFIG_VERSION,
             consider_empty_files_empty: true,
             ignore_hidden: true,
             ignore_errors: true,
@@ -42,9 +48,10 @@ impl Default for AppSettings {
     }
 }
 
-/// Generates platform-specific default ignore directories dynamically
+/// Generates platform-specific and safety-critical default ignore directories
 pub fn get_default_ignore_dirs() -> String {
     let mut ignore_dirs = vec![
+        // System & OS Protected Folders
         "System Volume Information".to_string(),
         "RECYCLER".to_string(),
         "Recycled".to_string(),
@@ -54,6 +61,11 @@ pub fn get_default_ignore_dirs() -> String {
         "GAC_32".to_string(),
         "winsxs".to_string(),
         "System32".to_string(),
+        // Developer, VCS & Package Manager Guards
+        ".git".to_string(),
+        ".svn".to_string(),
+        ".hg".to_string(),
+        "node_modules".to_string(),
     ];
 
     if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
@@ -78,7 +90,21 @@ pub fn get_default_ignore_dirs() -> String {
     ignore_dirs.join("\n")
 }
 
-/// Resolves the absolute path to the REDR configuration directory
+/// Automatically injects missing VCS/package manager guard exclusions during config upgrades
+fn migrate_safety_exclusions(ignore_list: &mut String) {
+    let safety_dirs = [".git", ".svn", ".hg", "node_modules"];
+    let existing: FxHashSet<String> = ignore_list.lines().map(|s| s.trim().to_string()).collect();
+
+    for &dir in &safety_dirs {
+        if !existing.contains(dir) {
+            if !ignore_list.is_empty() && !ignore_list.ends_with('\n') {
+                ignore_list.push('\n');
+            }
+            ignore_list.push_str(dir);
+        }
+    }
+}
+
 pub fn get_config_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -86,7 +112,6 @@ pub fn get_config_dir() -> Option<PathBuf> {
         .map(|d| d.join("REDR"))
 }
 
-/// Saves the configuration struct securely as pretty-printed JSON
 pub fn save_settings(settings: &AppSettings) {
     if let Some(config_dir) = get_config_dir() {
         let _ = fs::create_dir_all(&config_dir);
@@ -97,13 +122,18 @@ pub fn save_settings(settings: &AppSettings) {
     }
 }
 
-/// Loads the configuration state from disk, falling back to Defaults on failure
 pub fn load_settings() -> AppSettings {
     if let Some(config_dir) = get_config_dir() {
         let settings_path = config_dir.join("settings.json");
-        if let Ok(json_str) = fs::read_to_string(settings_path)
-            && let Ok(settings) = serde_json::from_str::<AppSettings>(&json_str)
+        if let Ok(json_str) = fs::read_to_string(&settings_path)
+            && let Ok(mut settings) = serde_json::from_str::<AppSettings>(&json_str)
         {
+            // One-time non-destructive migration for existing configs
+            if settings.version < CURRENT_CONFIG_VERSION {
+                migrate_safety_exclusions(&mut settings.ignore_list_text);
+                settings.version = CURRENT_CONFIG_VERSION;
+                save_settings(&settings);
+            }
             return settings;
         }
     }

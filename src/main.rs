@@ -1,15 +1,11 @@
-// Global window attributes (must be at the very top of the file)
-// Hides the console window on Windows when compiled in release mode.
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
 
-// Set the global memory allocator to mimalloc for massive multithreading performance gains
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// Declare all application modules
 mod cli;
 mod config;
 mod gui;
@@ -20,19 +16,41 @@ mod sys;
 use clap::Parser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Attach to the parent console on Windows so CLI output is visible
-    // even when compiled with the graphical "windows" subsystem.
+    let mut attached_console = false;
+
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        use windows_sys::Win32::System::Console::{
+            ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
+            STD_OUTPUT_HANDLE, SetStdHandle,
+        };
+        if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+            attached_console = true;
+            let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+            if !stdout.is_null() {
+                SetStdHandle(STD_OUTPUT_HANDLE, stdout);
+            }
+            let stderr = GetStdHandle(STD_ERROR_HANDLE);
+            if !stderr.is_null() {
+                SetStdHandle(STD_ERROR_HANDLE, stderr);
+            }
+        }
     }
 
-    // Parse command-line arguments
     let args = cli::Cli::parse();
 
-    // Route the application flow: Headless CLI/JSON mode vs Graphical UI mode
-    if args.quiet || args.delete || args.json {
+    let force_gui = args.gui;
+
+    // Run CLI when explicit flags are passed or when invoked directly from a console with a path
+    let should_run_cli = !force_gui
+        && (args.cli
+            || args.quiet
+            || args.delete
+            || args.dry_run
+            || args.json
+            || (args.path.is_some() && attached_console));
+
+    if should_run_cli {
         cli::run_cli(args)?;
     } else {
         gui::run_gui(args)?;

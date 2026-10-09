@@ -17,8 +17,6 @@ use std::thread;
 
 pub static AUTO_SAVE_LOGS: AtomicBool = AtomicBool::new(false);
 
-/// Thread-safe intermediate Data Transfer Object (DTO)
-/// Standard Rust types are used here so this struct can cross thread boundaries (Send).
 struct VisibleNodeData {
     name: String,
     path: String,
@@ -33,7 +31,6 @@ struct VisibleNodeData {
     is_symlink: bool,
 }
 
-/// Helper function to transform scanner nodes into pure thread-safe Rust models
 fn rebuild_visible_items(folders: &[scanner::DirectoryNode]) -> Vec<VisibleNodeData> {
     let mut result = Vec::new();
     let mut hide_depth = i32::MAX;
@@ -69,8 +66,8 @@ fn rebuild_visible_items(folders: &[scanner::DirectoryNode]) -> Vec<VisibleNodeD
             }
 
             result.push(VisibleNodeData {
-                name: node.name.to_string(),
-                path: node.path_str.to_string(),
+                name: node.name.clone(),
+                path: node.path_str.clone(),
                 depth: node.depth,
                 status: node.status,
                 has_children: node.has_children,
@@ -90,7 +87,6 @@ fn rebuild_visible_items(folders: &[scanner::DirectoryNode]) -> Vec<VisibleNodeD
     result
 }
 
-/// Converts the thread-safe intermediate models into Slint-specific UI models (must be called inside the UI Thread)
 fn to_slint_model(raw_items: Vec<VisibleNodeData>) -> ModelRc<DirectoryItem> {
     let slint_items: Vec<DirectoryItem> = raw_items
         .into_iter()
@@ -103,7 +99,6 @@ fn to_slint_model(raw_items: Vec<VisibleNodeData>) -> ModelRc<DirectoryItem> {
             is_expanded: item.is_expanded,
             id: item.id,
             is_root: item.is_root,
-            tree_prefix: SharedString::new(),
             tree_lines: std::rc::Rc::new(slint::VecModel::from(item.tree_lines)).into(),
             is_hidden: item.is_hidden,
             is_symlink: item.is_symlink,
@@ -112,9 +107,9 @@ fn to_slint_model(raw_items: Vec<VisibleNodeData>) -> ModelRc<DirectoryItem> {
     Rc::new(VecModel::from(slint_items)).into()
 }
 
-/// Extracts the current configuration state from the Slint Global State
 fn ui_to_settings(app_state: &AppState) -> AppSettings {
     AppSettings {
+        version: config::CURRENT_CONFIG_VERSION,
         consider_empty_files_empty: app_state.get_consider_empty_files_empty(),
         ignore_hidden: app_state.get_ignore_hidden(),
         ignore_errors: app_state.get_ignore_errors(),
@@ -136,16 +131,11 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
     let ui_handle = ui.as_weak();
 
-    // Extracted global state handle for bridging Logic to GUI seamlessly
     let app_state = ui.global::<AppState>();
-
-    // Load persisted settings on startup
     let settings = config::load_settings();
 
-    // Set atomic flag for logs immediately
     AUTO_SAVE_LOGS.store(settings.auto_save_logs, Ordering::Relaxed);
 
-    // Apply loaded parameters directly to Slint UI State properties
     app_state.set_consider_empty_files_empty(settings.consider_empty_files_empty);
     app_state.set_ignore_hidden(settings.ignore_hidden);
     app_state.set_ignore_errors(settings.ignore_errors);
@@ -161,11 +151,9 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     app_state.set_ignore_files_text(settings.ignore_files_text.into());
     app_state.set_dry_run(settings.dry_run);
 
-    // Initialize OS-specific options
     app_state.set_is_integrated(sys::check_registry_integration());
     app_state.set_is_admin(sys::is_admin());
 
-    // Drag-and-Drop Integration
     let ui_weak_dnd = ui_handle.clone();
     ui.window().on_winit_window_event(move |_, event| {
         if let winit::event::WindowEvent::DroppedFile(path_buf) = event
@@ -192,7 +180,7 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let ui_weak_log = ui_handle.clone();
     let found_folders_log = found_folders.clone();
 
-    // Background thread to manage logs, progress metrics, and UI state updates
+    // Logger & UI syncer thread
     thread::spawn(move || {
         let mut logs = VecDeque::with_capacity(300);
         let mut last_rebuild_time = std::time::Instant::now();
@@ -223,13 +211,10 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
 
             process_event(evt);
-
-            // Drain all pending events rapidly from the channel to prevent lockups
             while let Ok(m) = log_rx.try_recv() {
                 process_event(m);
             }
 
-            // Batch-write log entries in a single OS transaction
             if !batch_log_msgs.is_empty()
                 && AUTO_SAVE_LOGS.load(Ordering::Relaxed)
                 && let Some(ref path) = log_file_path
@@ -247,22 +232,26 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 logs_changed = true;
             }
 
-            let folders_clone = {
+            let mut list_items_opt = None;
+            if pending_status_updates {
+                let now = std::time::Instant::now();
+                let elapsed_ms = now.duration_since(last_rebuild_time).as_millis();
+                let is_finished = progress_update.map(|p| p >= 1.0).unwrap_or(false);
+
                 let mut folders = found_folders_log.lock().unwrap();
                 for &(index, status) in &status_updates {
                     if let Some(node) = folders.get_mut(index) {
                         node.status = status;
                     }
                 }
-                folders.clone()
-            };
 
-            let now = std::time::Instant::now();
-            let elapsed_ms = now.duration_since(last_rebuild_time).as_millis();
-            let is_finished = progress_update.map(|p| p >= 1.0).unwrap_or(false);
-
-            let should_rebuild = pending_status_updates
-                && (elapsed_ms >= 120 || folders_clone.len() < 150 || is_finished);
+                let should_rebuild = elapsed_ms >= 120 || folders.len() < 150 || is_finished;
+                if should_rebuild {
+                    last_rebuild_time = now;
+                    pending_status_updates = false;
+                    list_items_opt = Some(rebuild_visible_items(&folders));
+                }
+            }
 
             let combined = if logs_changed {
                 Some(logs.iter().cloned().collect::<String>())
@@ -270,32 +259,18 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            // Perform heavy filtering in the background thread (using pure Rust types)
-            let list_items_opt = if should_rebuild {
-                last_rebuild_time = now;
-                pending_status_updates = false;
-                Some(rebuild_visible_items(&folders_clone))
-            } else {
-                None
-            };
-
-            // Pass the Send-safe data across the thread boundary
             let _ = ui_weak_log.upgrade_in_event_loop(move |ui| {
                 let state = ui.global::<AppState>();
                 if let Some(log_str) = combined {
                     state.set_log_text(log_str.into());
                 }
-
                 if let Some(p) = progress_update {
                     state.set_progress(p);
                 }
-
-                // Smoothly inject pre-built UI components without halting the main thread
                 if let Some(items) = list_items_opt {
                     state.set_directories(to_slint_model(items));
                 }
             });
-            thread::sleep(std::time::Duration::from_millis(16));
         }
     });
 
@@ -329,7 +304,10 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let found_folders_toggle = found_folders.clone();
     app_state.on_toggle_expand(move |id| {
         let mut folders = found_folders_toggle.lock().unwrap();
-        if let Some(node) = folders.get_mut(id as usize) {
+        if let Some(node) = (id >= 0)
+            .then_some(id as usize)
+            .and_then(|i| folders.get_mut(i))
+        {
             node.is_expanded = !node.is_expanded;
         }
         let list_items = rebuild_visible_items(&folders);
@@ -355,9 +333,10 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Flexible Exclusion Protection (by Name or by Full Path)
     let ui_weak_exclude = ui_handle.clone();
     let found_folders_exclude = found_folders.clone();
-    app_state.on_add_to_exclusions(move |id| {
+    app_state.on_add_to_exclusions(move |id, use_full_path| {
         let ui = match ui_weak_exclude.upgrade() {
             Some(ui) => ui,
             None => return,
@@ -365,26 +344,35 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let state = ui.global::<AppState>();
 
         let mut folders = found_folders_exclude.lock().unwrap();
-        if let Some(node) = folders.get_mut(id as usize) {
-            let folder_name = node.name.clone();
+        if let Some(target_idx) = (id >= 0)
+            .then_some(id as usize)
+            .filter(|&i| i < folders.len())
+        {
+            let entry_to_add = if use_full_path {
+                folders[target_idx].path_str.clone()
+            } else {
+                folders[target_idx].name.clone()
+            };
+            let target_path_buf = folders[target_idx].path.to_path_buf();
 
             let mut current_list = state.get_ignore_list_text().to_string();
             let current_items: std::collections::HashSet<&str> =
                 current_list.split('\n').map(|s| s.trim()).collect();
 
-            if !current_items.contains(folder_name.as_str()) {
+            if !current_items.contains(entry_to_add.as_str()) {
                 if !current_list.is_empty() && !current_list.ends_with('\n') {
                     current_list.push('\n');
                 }
-                current_list.push_str(&folder_name);
+                current_list.push_str(&entry_to_add);
                 state.set_ignore_list_text(current_list.into());
             }
 
-            node.status = 3;
-            let target_path_buf = node.path.to_path_buf();
-            for other_node in folders.iter_mut() {
-                if other_node.path.starts_with(&target_path_buf) {
-                    other_node.status = 3;
+            // Mark node and descendants as Protected; demote ancestors from Empty to Normal
+            for node in folders.iter_mut() {
+                if node.path.starts_with(&target_path_buf) {
+                    node.status = 3;
+                } else if target_path_buf.starts_with(&*node.path) && node.status == 1 {
+                    node.status = 0;
                 }
             }
         }
@@ -521,6 +509,14 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let path = PathBuf::from(folder_path);
+        if !path.is_dir() {
+            logger.log(&format!(
+                "[!] Path does not exist or is not a directory: {:?}",
+                path
+            ));
+            state.set_is_scanning(false);
+            return;
+        }
 
         let settings = scanner::ScanSettings {
             ignore_files: ignore_files
@@ -602,18 +598,15 @@ pub fn run_gui(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         empty_count, count
                     ));
 
-                    let folders_clone = {
+                    let folders_guard = {
                         let mut state = folders_state.lock().unwrap();
                         *state = empty_dirs;
-                        state.clone()
+                        rebuild_visible_items(&state)
                     };
-
-                    // Compute UI models purely in background thread
-                    let list_items = rebuild_visible_items(&folders_clone);
 
                     let _ = ui_weak_thread.upgrade_in_event_loop(move |ui| {
                         let state = ui.global::<AppState>();
-                        state.set_directories(to_slint_model(list_items));
+                        state.set_directories(to_slint_model(folders_guard));
                         state.set_empty_count(empty_count as i32);
                         state.set_deleted_count(0);
                         state.set_failed_count(0);

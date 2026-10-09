@@ -23,7 +23,6 @@ export struct DirectoryItem {
     is_expanded: bool,
     id: int,
     is_root: bool,
-    tree_prefix: string,
     tree_lines: [int],
     is_hidden: bool,
     is_symlink: bool,
@@ -52,10 +51,8 @@ export global AppTheme {
 }
 
 export global AppState {
-    // Navigation
     in-out property <int> active_tab: 0;
 
-    // Data & State
     in-out property <string> selected_folder: "";
     in-out property <string> log_text: "";
     in-out property <string> status_msg: "Ready.";
@@ -64,16 +61,13 @@ export global AppState {
     in-out property <bool> is_deleting: false;
     in-out property <float> progress: 0.0;
 
-    // Context Menu Triggers
     in-out property <int> selected_context_item_id: -1;
     in-out property <string> selected_context_item_path: "";
 
-    // Counts
     in-out property <int> empty_count: 0;
     in-out property <int> deleted_count: 0;
     in-out property <int> failed_count: 0;
 
-    // Settings
     in-out property <bool> consider_empty_files_empty: true;
     in-out property <bool> ignore_hidden: true;
     in-out property <bool> ignore_errors: true;
@@ -85,7 +79,6 @@ export global AppState {
     in-out property <int> pause_ms: 0;
     in-out property <bool> dry_run: false;
 
-    // Strings & OS Integration
     in-out property <string> ignore_list_text: "";
     in-out property <string> ignore_files_text: "";
     in-out property <bool> is_integrated: false;
@@ -93,7 +86,6 @@ export global AppState {
     in-out property <bool> mft_scan: false;
     in-out property <bool> is_admin: false;
 
-    // Logic Callbacks
     callback browse_folder() -> string;
     callback search_folders();
     callback delete_folders();
@@ -103,7 +95,7 @@ export global AppState {
     callback reset_defaults();
 
     callback open_in_explorer(string);
-    callback add_to_exclusions(int);
+    callback add_to_exclusions(int, bool); // (id, use_full_path)
 
     callback toggle_context_menu(bool);
     callback toggle_auto_save_logs(bool);
@@ -259,10 +251,6 @@ component ExpandCollapseIcon {
     }
 }
 
-// ==========================================
-// UI COMPONENTS
-// ==========================================
-
 component TabButton {
     in property <string> text;
     in property <bool> active;
@@ -314,7 +302,6 @@ component CustomButton {
         opacity: !enabled ? 0.5 : 1.0;
         animate background { duration: 120ms; }
 
-        // Dynamic width adjustment based on text + padding
         HorizontalLayout {
             padding-left: 16px;
             padding-right: 16px;
@@ -346,11 +333,6 @@ component CustomButton {
     ]
 }
 
-// ==========================================
-// MICRO-COMPONENTS
-// ==========================================
-
-// DRY component for Legends
 component LegendRow {
     in property <string> label;
     in property <color> label-color: AppTheme.text-normal;
@@ -449,7 +431,7 @@ component LegendPanel inherits Rectangle {
             FailedIcon { }
         }
 
-        Rectangle { } // Spacer
+        Rectangle { }
 
         LegendRow {
             label: "Will not be touched";
@@ -643,11 +625,6 @@ component EmptyState inherits Rectangle {
         }
     }
 }
-
-
-// ==========================================
-// TABS
-// ==========================================
 
 component FindTab inherits VerticalLayout {
     padding: 16px;
@@ -921,7 +898,7 @@ component SettingsTab inherits ScrollView {
                     }
                 }
 
-                Rectangle { } // Spacer
+                Rectangle { }
             }
         }
 
@@ -1047,10 +1024,6 @@ component LogTab inherits VerticalLayout {
     }
 }
 
-// ==========================================
-// MAIN APP WINDOW ROUTER
-// ==========================================
-
 export component AppWindow inherits Window {
     title: "REDR - Da Red 'Unz Go Fasta!";
     icon: @image-url("../assets/icon.png");
@@ -1066,8 +1039,8 @@ export component AppWindow inherits Window {
     context_menu := PopupWindow {
         x: root.cm_x;
         y: root.cm_y;
-        width: 180px;
-        height: 56px;
+        width: 190px;
+        height: 78px;
         close-policy: close-on-click;
 
         Rectangle {
@@ -1078,12 +1051,16 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 4px;
                 spacing: 2px;
+
                 Rectangle {
                     height: 22px;
-                    background: exc-ta.has-hover ? AppTheme.primary : transparent;
+                    background: exc-name-ta.has-hover ? AppTheme.primary : transparent;
                     border-radius: 2px;
-                    exc-ta := TouchArea {
-                        clicked => { context_menu.close(); AppState.add_to_exclusions(AppState.selected_context_item_id); }
+                    exc-name-ta := TouchArea {
+                        clicked => {
+                            context_menu.close();
+                            AppState.add_to_exclusions(AppState.selected_context_item_id, false);
+                        }
                     }
 
                     HorizontalLayout {
@@ -1097,7 +1074,37 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "Add to Exclusions";
+                            text: "Exclude Folder Name";
+                            color: #ffffff;
+                            vertical-alignment: center;
+                            font-size: 11px;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 22px;
+                    background: exc-path-ta.has-hover ? AppTheme.primary : transparent;
+                    border-radius: 2px;
+                    exc-path-ta := TouchArea {
+                        clicked => {
+                            context_menu.close();
+                            AppState.add_to_exclusions(AppState.selected_context_item_id, true);
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        spacing: 8px;
+                        alignment: start;
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            ProtectedIcon { }
+                        }
+
+                        Text {
+                            text: "Exclude Full Path";
                             color: #ffffff;
                             vertical-alignment: center;
                             font-size: 11px;
@@ -1110,7 +1117,10 @@ export component AppWindow inherits Window {
                     background: op-ta.has-hover ? AppTheme.primary : transparent;
                     border-radius: 2px;
                     op-ta := TouchArea {
-                        clicked => { context_menu.close(); AppState.open_in_explorer(AppState.selected_context_item_path); }
+                        clicked => {
+                            context_menu.close();
+                            AppState.open_in_explorer(AppState.selected_context_item_path);
+                        }
                     }
 
                     HorizontalLayout {
@@ -1141,7 +1151,6 @@ export component AppWindow inherits Window {
         padding: 16px;
         spacing: 12px;
 
-        // Navigation Header
         HorizontalLayout {
             spacing: 4px;
             alignment: start;
@@ -1171,7 +1180,6 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Active Tab Viewport
         Rectangle {
             background: AppTheme.bg-panel;
             border-color: AppTheme.border;
