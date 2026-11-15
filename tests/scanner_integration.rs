@@ -1,5 +1,8 @@
 use redr::config;
-use redr::scanner::{NodeStatus, ScanSettings, is_protected_path, scan_empty_dirs};
+use redr::scanner::{
+    DeleteSettings, NodeStatus, ScanSettings, delete_empty_dirs, is_protected_path,
+    scan_empty_dirs, scan_streaming,
+};
 
 use std::fs;
 use std::path::PathBuf;
@@ -182,6 +185,75 @@ fn the_tree_knows_the_children_and_the_last_sibling() {
     assert!(pos("a") < pos("a1"));
     assert!(pos("a1") < pos("a2"));
     assert!(pos("a2") < pos("b"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_root_of_the_scan_is_never_a_removal_candidate() {
+    let root = temp_dir("root_status");
+    // Every directory below the root is empty, so the root looks empty too.
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // The parallel walker.
+    let nodes = scan_empty_dirs(&root, &settings(), &cancel).unwrap();
+    let root_node = nodes
+        .iter()
+        .find(|n| n.depth == 0)
+        .expect("the root is missing");
+    assert_eq!(root_node.status, NodeStatus::Normal);
+
+    // The streaming walker.
+    let mut streamed = Vec::new();
+    scan_streaming(&root, &settings(), &cancel, &mut |node| streamed.push(node)).unwrap();
+    let root_node = streamed
+        .iter()
+        .find(|n| n.depth == 0)
+        .expect("the root is missing");
+    assert_eq!(root_node.status, NodeStatus::Normal);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_root_of_the_scan_is_never_deleted() {
+    let root = temp_dir("root_delete");
+    fs::create_dir_all(root.join("a")).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut nodes = scan_empty_dirs(&root, &settings(), &cancel).unwrap();
+
+    // Even when the scan marks the root as empty, it stays.
+    for node in nodes.iter_mut() {
+        if node.depth == 0 {
+            node.status = NodeStatus::Empty;
+        }
+    }
+
+    let delete_settings = DeleteSettings {
+        move_to_trash: false,
+        ignore_errors: true,
+        pause_ms: 0,
+        ignore_files: vec![],
+        consider_empty_files_empty: false,
+        dry_run: false,
+        protected_paths: vec![],
+    };
+
+    let (deleted, failed) = delete_empty_dirs(
+        &mut nodes,
+        &delete_settings,
+        &|_index, _status| {},
+        &|_progress| {},
+        &cancel,
+    );
+
+    assert_eq!(failed, 0);
+    assert_eq!(deleted, 1, "only the empty child may be deleted");
+    assert!(root.exists(), "the root of the scan was deleted");
 
     let _ = fs::remove_dir_all(&root);
 }

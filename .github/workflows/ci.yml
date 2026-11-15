@@ -16,7 +16,7 @@ jobs:
     runs-on: windows-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
@@ -45,11 +45,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [dev, release]
+        include:
+          # The dev profile builds into target/debug, the release profile into
+          # target/release.
+          - profile: dev
+            target-dir: debug
+          - profile: release
+            target-dir: release
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
@@ -63,8 +69,8 @@ jobs:
       run: cargo build --workspace --profile ${{ matrix.profile }}
 
     - name: Upload binary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: REDR-${{ matrix.profile }}
-        path: target/${{ matrix.profile }}/REDR.exe
+        path: target/${{ matrix.target-dir }}/REDR.exe
         if-no-files-found: error

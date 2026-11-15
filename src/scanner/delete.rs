@@ -124,6 +124,9 @@ where
         .iter()
         .enumerate()
         .filter(|(_, node)| node.status == NodeStatus::Empty || node.status == NodeStatus::Orphaned)
+        // The root of the scan is the starting point of the search: it is
+        // never removed.
+        .filter(|(_, node)| node.depth > 0)
         // Whitelisted paths are never removed, whatever the scan said.
         .filter(|(_, node)| !is_protected_path(&node.path, &settings.protected_paths))
         .map(|(i, _)| i)
