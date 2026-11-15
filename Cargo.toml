@@ -3,6 +3,17 @@ name = "REDR"
 version = "1.0.0"
 edition = "2024"
 build = "build.rs"
+description = "Fast empty-directory finder for Windows, with MFT scanning, dry-run and recycle bin support"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "redr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "REDR"
+path = "src/main.rs"
 
 [dependencies]
 mimalloc = "0.1.52"
@@ -18,6 +29,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 chrono = "0.4.45"
 ntfs-reader = "0.6.0"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+[dev-dependencies]
+proptest = "1.12.0"
 
 [build-dependencies]
 embed-resource = "3.0.12"
@@ -38,3 +54,11 @@ lto = "thin"
 codegen-units = 16
 panic = "abort"
 strip = true
+
+# The tests and the proptest run are much faster unoptimised, and the
+# GUI is not used in them anyway.
+[profile.test]
+opt-level = 1
+
+[profile.dev]
+opt-level = 1

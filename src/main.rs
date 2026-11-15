@@ -7,11 +7,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
-mod config;
 mod gui;
-mod logger;
-mod scanner;
-mod sys;
 
 use clap::Parser;
 
@@ -47,10 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || args.quiet
             || args.delete
             || args.dry_run
+            || args.execute
             || args.json
             || (args.path.is_some() && attached_console));
 
     if should_run_cli {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
         cli::run_cli(args)?;
     } else {
         gui::run_gui(args)?;

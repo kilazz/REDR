@@ -1,0 +1,250 @@
+﻿msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+msgid "Auto-save logs to file (%APPDATA%\\REDR\\logs\\)"
+msgstr ""
+
+msgid "Browse..."
+msgstr ""
+
+msgid "Cached Results"
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "Dark theme"
+msgstr ""
+
+msgid "Delete"
+msgstr ""
+
+msgid "Delete matches"
+msgstr ""
+
+msgid "Delete Mode"
+msgstr ""
+
+msgid "Delete permanently"
+msgstr ""
+
+msgid "Delete to recycle bin and ignore errors (safer)"
+msgstr ""
+
+msgid "Deleted"
+msgstr ""
+
+msgid "Deleted: {0}"
+msgstr ""
+
+msgid "Direct MFT Scan (NTFS & Windows Administrator only)"
+msgstr ""
+
+msgid "Directories to Ignore (One per line):"
+msgstr ""
+
+msgid "Directories with empty files will be considered empty"
+msgstr ""
+
+msgid "Drag & Drop a folder here\nor use the browse button to select a directory"
+msgstr ""
+
+msgid "Drive"
+msgstr ""
+
+msgid "Empty"
+msgstr ""
+
+msgid "Empty/Deletable: {0}"
+msgstr ""
+
+msgid "Exclude Folder Name"
+msgstr ""
+
+msgid "Exclude Full Path"
+msgstr ""
+
+msgid "Exit"
+msgstr ""
+
+msgid "Export Log..."
+msgstr ""
+
+msgid "Export Results"
+msgstr ""
+
+msgid "Failed"
+msgstr ""
+
+msgid "Failed: {0}"
+msgstr ""
+
+msgid "Filenames to Ignore (One per line, e.g., *.tmp):"
+msgstr ""
+
+msgid "Filters"
+msgstr ""
+
+msgid "Find"
+msgstr ""
+
+msgid "General Options"
+msgstr ""
+
+msgid "Group results by:"
+msgstr ""
+
+msgid "Hidden (Semi-transp.)"
+msgstr ""
+
+msgid "Hide search errors (like access denied errors)"
+msgstr ""
+
+msgid "How should empty directories be deleted?"
+msgstr ""
+
+msgid "Icon Meanings"
+msgstr ""
+
+msgid "Ignore errors during deletion"
+msgstr ""
+
+msgid "Ignore files older than (hours, 0 = off):"
+msgstr ""
+
+msgid "Ignore hidden directories"
+msgstr ""
+
+msgid "Include deleted files in MFT scan (best effort)"
+msgstr ""
+
+msgid "Incremental rescan (reuse unchanged subtrees)"
+msgstr ""
+
+msgid "Integrate into Windows Explorer Context Menu"
+msgstr ""
+
+msgid "Limits & Performance"
+msgstr ""
+
+msgid "Load"
+msgstr ""
+
+msgid "Log"
+msgstr ""
+
+msgid "Max directory nesting depth (-1 = infinite):"
+msgstr ""
+
+msgid "Max scan results (0 = unlimited):"
+msgstr ""
+
+msgid "Never Empty"
+msgstr ""
+
+msgid "No Directory Scanned"
+msgstr ""
+
+msgid "Open in File Explorer"
+msgstr ""
+
+msgid "Open Logs Folder"
+msgstr ""
+
+msgid "OS Integration & Logs"
+msgstr ""
+
+msgid "Pause between each deletion in ms:"
+msgstr ""
+
+msgid "Please choose a directory to check:"
+msgstr ""
+
+msgid "Protect symlinks and junctions from deletion"
+msgstr ""
+
+msgid "Protected"
+msgstr ""
+
+msgid "Protected Paths (never deleted, one per line):"
+msgstr ""
+
+msgid "Ready."
+msgstr ""
+
+msgid "REDR - Da Red 'Unz Go Fasta!"
+msgstr ""
+
+msgid "Reset Configuration"
+msgstr ""
+
+msgid "Reset to Defaults"
+msgstr ""
+
+msgid "Restore all settings and filters to their default startup values."
+msgstr ""
+
+msgid "Restore Deleted"
+msgstr ""
+
+msgid "Restore This Folder"
+msgstr ""
+
+msgid "Root"
+msgstr ""
+
+msgid "Save"
+msgstr ""
+
+msgid "Save the current filters and options under a name, then restore them later."
+msgstr ""
+
+msgid "Search"
+msgstr ""
+
+msgid "Settings"
+msgstr ""
+
+msgid "Settings Profiles"
+msgstr ""
+
+msgid "Show logs"
+msgstr ""
+
+msgid "Simulation Mode (Dry-run - safely preview deletions)"
+msgstr ""
+
+msgid "Skip folders less than N hours old:"
+msgstr ""
+
+msgid "Skip system directories (recommended)"
+msgstr ""
+
+msgid "Streaming scan (lower memory usage)"
+msgstr ""
+
+msgid "Symlink / Junction"
+msgstr ""
+
+msgid "Top-level folder"
+msgstr ""
+
+msgid "Total found: {0}"
+msgstr ""
+
+msgid "Trash only (never delete permanently)"
+msgstr ""
+
+msgid "Treat files up to this size (bytes) as empty:"
+msgstr ""
+
+msgid "Tree (default)"
+msgstr ""
+
+msgid "Will be deleted"
+msgstr ""
+
+msgid "Will not be touched"
+msgstr ""
+

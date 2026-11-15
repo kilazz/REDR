@@ -31,13 +31,10 @@ impl UiLogger {
         }
     }
 
-    /// Dispatches operational status adjustments and synchronizes the active node state
-    pub fn status(&self, msg: &str, index: usize, status: i32) {
+    /// Dispatches only a status synchronization without a log message
+    pub fn status_code(&self, index: usize, status: i32) {
         if let Some(sender) = &self.sender {
-            let _ = sender.send(LogEvent::Msg(format!("{}\n", msg)));
             let _ = sender.send(LogEvent::StatusChange(index, status));
-        } else {
-            println!("{}", msg);
         }
     }
 

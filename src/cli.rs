@@ -1,6 +1,6 @@
-use crate::scanner::{self, DeleteSettings, ScanSettings};
-use crate::sys::is_admin;
 use clap::Parser;
+use redr::scanner::{self, DeleteSettings, ScanSettings};
+use redr::sys::is_admin;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,8 +18,13 @@ pub struct Cli {
     #[arg(short, long)]
     pub delete: bool,
 
+    /// Simulate the deletion without removing anything
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Actually delete (turns the safe dry-run default off)
+    #[arg(long, conflicts_with = "dry_run")]
+    pub execute: bool,
 
     #[arg(long)]
     pub json: bool,
@@ -62,6 +67,14 @@ pub struct Cli {
 
     #[arg(long, default_value_t = true)]
     pub hide_search_errors: bool,
+
+    /// Paths that must never be deleted (comma or semicolon separated)
+    #[arg(long, default_value = "")]
+    pub protect_paths: String,
+
+    /// Never delete permanently: everything goes to the recycle bin
+    #[arg(long, default_value_t = false)]
+    pub trash_only: bool,
 }
 
 #[derive(Serialize)]
@@ -118,6 +131,17 @@ pub fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         max_depth: cli.max_depth,
         consider_empty_files_empty: cli.consider_empty_files_empty,
         hide_search_errors: cli.hide_search_errors,
+        include_deleted: false,
+        empty_file_max_size: 0,
+        ignore_files_older_than_hours: 0,
+        max_results: 0,
+        protect_symlinks: true,
+        protected_paths: cli
+            .protect_paths
+            .split([',', ';'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
     };
 
     if !cli.quiet && !cli.json {
@@ -128,53 +152,22 @@ pub fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut dirs = if use_mft {
         #[cfg(target_os = "windows")]
-        match scanner::scan_empty_dirs_mft(
-            &path,
-            &scan_settings,
-            &|msg| {
-                if !cli.quiet && !cli.json {
-                    println!("{}", msg);
-                }
-            },
-            &dummy_cancel,
-        ) {
+        match scanner::scan_empty_dirs_mft(&path, &scan_settings, &dummy_cancel) {
             Ok(res) => res,
-            Err(_) => scanner::scan_empty_dirs(
-                &path,
-                &scan_settings,
-                &|msg| {
-                    if !cli.quiet && !cli.json {
-                        println!("{}", msg);
-                    }
-                },
-                &dummy_cancel,
-            )?,
+            Err(_) => scanner::scan_empty_dirs(&path, &scan_settings, &dummy_cancel)?,
         }
         #[cfg(not(target_os = "windows"))]
-        scanner::scan_empty_dirs(
-            &path,
-            &scan_settings,
-            &|msg| {
-                if !cli.quiet && !cli.json {
-                    println!("{}", msg);
-                }
-            },
-            &dummy_cancel,
-        )?
+        scanner::scan_empty_dirs(&path, &scan_settings, &dummy_cancel)?
     } else {
-        scanner::scan_empty_dirs(
-            &path,
-            &scan_settings,
-            &|msg| {
-                if !cli.quiet && !cli.json {
-                    println!("{}", msg);
-                }
-            },
-            &dummy_cancel,
-        )?
+        scanner::scan_empty_dirs(&path, &scan_settings, &dummy_cancel)?
     };
 
-    let empty_count = dirs.iter().filter(|d| d.status == 1).count();
+    let empty_count = dirs
+        .iter()
+        .filter(|d| {
+            d.status == scanner::NodeStatus::Empty || d.status == scanner::NodeStatus::Orphaned
+        })
+        .count();
     if !cli.quiet && !cli.json {
         println!("[+] Found {} empty directories.", empty_count);
     }
@@ -183,8 +176,9 @@ pub fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.json {
         for d in &dirs {
             let status_str = match d.status {
-                1 => "empty",
-                3 => "protected",
+                scanner::NodeStatus::Empty => "empty",
+                scanner::NodeStatus::Orphaned => "orphaned",
+                scanner::NodeStatus::Protected => "protected",
                 _ => "normal",
             };
             json_dirs.push(JsonDir {
@@ -196,26 +190,41 @@ pub fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut deletion_summary = None;
     if cli.delete && empty_count > 0 {
+        // Deleting is opt-in: without --execute the run only simulates.
+        let dry_run = !cli.execute;
+        if dry_run && !cli.quiet && !cli.json {
+            println!(
+                "[i] Simulation mode: nothing will be deleted. Pass --execute to really delete."
+            );
+        }
         let delete_settings = DeleteSettings {
-            move_to_trash: !cli.delete_permanently,
+            move_to_trash: !cli.delete_permanently || cli.trash_only,
             ignore_errors: true,
             pause_ms: 0,
             ignore_files: scan_settings.ignore_files.clone(),
             consider_empty_files_empty: cli.consider_empty_files_empty,
-            dry_run: cli.dry_run,
+            dry_run,
+            protected_paths: scan_settings.protected_paths.clone(),
         };
 
         let (deleted, failed) = scanner::delete_empty_dirs(
             &mut dirs,
             &delete_settings,
-            &|msg, _, _| {
-                if !cli.quiet && !cli.json {
-                    println!("{}", msg);
-                }
-            },
+            &|_, _| {},
             &|_| {},
             &dummy_cancel,
         );
+
+        let deleted_paths: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|d| d.status == scanner::NodeStatus::Deleted)
+            .map(|d| d.path.to_path_buf())
+            .collect();
+        // A simulation removes nothing, so it must not pollute the history.
+        if !dry_run {
+            scanner::append_deleted_paths(&deleted_paths);
+            scanner::append_deletion_history(&deleted_paths);
+        }
 
         if !cli.quiet && !cli.json {
             println!(
@@ -228,7 +237,7 @@ pub fn run_cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             deletion_summary = Some(JsonDeletionSummary {
                 deleted,
                 failed,
-                dry_run: cli.dry_run,
+                dry_run,
             });
         }
     }

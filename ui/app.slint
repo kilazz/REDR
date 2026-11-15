@@ -26,36 +26,41 @@ export struct DirectoryItem {
     tree_lines: [int],
     is_hidden: bool,
     is_symlink: bool,
+    is_group_header: bool,
 }
 
 export global AppTheme {
-    out property <color> bg-main: #1e1e1e;
-    out property <color> bg-panel: #252526;
-    out property <color> bg-hover: #2d2d30;
-    out property <color> border: #3e3e42;
+    out property <bool> dark: AppState.dark_theme;
 
-    out property <color> text-normal: #D4D4D4;
-    out property <color> text-muted: #858585;
+    out property <color> bg-main: dark ? #1e1e1e : #f5f5f5;
+    out property <color> bg-panel: dark ? #252526 : #ffffff;
+    out property <color> bg-hover: dark ? #2d2d30 : #e8e8e8;
+    out property <color> border: dark ? #3e3e42 : #d0d0d0;
+
+    out property <color> text-normal: dark ? #D4D4D4 : #1f1f1f;
+    out property <color> text-muted: dark ? #858585 : #6a6a6a;
 
     out property <color> status-empty: #FF5555;
-    out property <color> status-deleted: #55FF55;
+    out property <color> status-orphaned: #FFAA00;
+    out property <color> status-deleted: #33AA33;
     out property <color> status-protected: #55A0FF;
-    out property <color> status-failed: #FFB86C;
+    out property <color> status-failed: #d1760b;
 
     out property <color> folder-normal: #E0A96D;
 
-    out property <color> primary: #0e639c;
+    out property <color> primary: dark ? #0e639c : #1a6fb5;
     out property <color> danger: #e04545;
-    out property <color> btn-dark: #3a3a3a;
-    out property <color> btn-grey: #444444;
+    out property <color> btn-dark: dark ? #3a3a3a : #dcdcdc;
+    out property <color> btn-grey: dark ? #444444 : #c8c8c8;
 }
 
 export global AppState {
     in-out property <int> active_tab: 0;
 
     in-out property <string> selected_folder: "";
+    in-out property <string> search_text: "";
     in-out property <string> log_text: "";
-    in-out property <string> status_msg: "Ready.";
+    in-out property <string> status_msg: @tr("Ready.");
     in-out property <[DirectoryItem]> directories: [];
     in-out property <bool> is_scanning: false;
     in-out property <bool> is_deleting: false;
@@ -63,6 +68,7 @@ export global AppState {
 
     in-out property <int> selected_context_item_id: -1;
     in-out property <string> selected_context_item_path: "";
+    in-out property <int> selected_context_item_status: 0;
 
     in-out property <int> empty_count: 0;
     in-out property <int> deleted_count: 0;
@@ -77,13 +83,26 @@ export global AppState {
     in-out property <int> max_depth: -1;
     in-out property <int> min_age_hours: 0;
     in-out property <int> pause_ms: 0;
-    in-out property <bool> dry_run: false;
 
     in-out property <string> ignore_list_text: "";
     in-out property <string> ignore_files_text: "";
     in-out property <bool> is_integrated: false;
     in-out property <bool> auto_save_logs: false;
     in-out property <bool> mft_scan: false;
+    in-out property <bool> mft_include_deleted: false;
+    in-out property <bool> incremental_scan: true;
+    in-out property <bool> streaming_scan: true;
+    in-out property <bool> dark_theme: true;
+    in-out property <int> empty_file_max_size: 0;
+    in-out property <int> ignore_files_older_than_hours: 0;
+    in-out property <int> max_scan_results: 0;
+    in-out property <bool> protect_symlinks: true;
+    in-out property <bool> trash_only: false;
+    in-out property <int> group_by: 0;
+    in-out property <string> whitelist_text: "";
+    in-out property <string> profile_name: "";
+    in-out property <string> profile_list: "";
+    in-out property <bool> dry_run: true;
     in-out property <bool> is_admin: false;
 
     callback browse_folder() -> string;
@@ -96,11 +115,20 @@ export global AppState {
 
     callback open_in_explorer(string);
     callback add_to_exclusions(int, bool); // (id, use_full_path)
+    callback restore_context_item();
 
     callback toggle_context_menu(bool);
     callback toggle_auto_save_logs(bool);
 
     callback export_log();
+    callback export_results();
+    callback restore_deleted();
+    callback search_changed(string);
+    callback group_mode_changed(int);
+    callback load_cached_scan();
+    callback save_profile(string);
+    callback load_profile(string);
+    callback delete_profile(string);
     callback open_logs_folder();
 }
 
@@ -365,19 +393,19 @@ component LegendPanel inherits Rectangle {
         padding: 12px;
         spacing: 8px;
         Text {
-            text: "Icon Meanings";
+            text: @tr("Icon Meanings");
             font-weight: 700;
             color: #FFFFFF;
             font-size: 13px;
         }
 
         LegendRow {
-            label: "Root";
+            label: @tr("Root");
             HomeIcon { }
         }
 
         LegendRow {
-            label: "Hidden (Semi-transp.)";
+            label: @tr("Hidden (Semi-transp.)");
             label-color: #A9A9A9;
             FolderIcon {
                 opacity: 0.5;
@@ -385,7 +413,7 @@ component LegendPanel inherits Rectangle {
         }
 
         LegendRow {
-            label: "Symlink / Junction";
+            label: @tr("Symlink / Junction");
             label-color: #A9A9A9;
             FolderIcon { }
 
@@ -401,18 +429,18 @@ component LegendPanel inherits Rectangle {
         }
 
         LegendRow {
-            label: "Never Empty";
+            label: @tr("Never Empty");
             NeverEmptyFolderIcon { }
         }
 
         LegendRow {
-            label: "Protected";
+            label: @tr("Protected");
             label-color: AppTheme.status-protected;
             ProtectedIcon { }
         }
 
         LegendRow {
-            label: "Empty";
+            label: @tr("Empty");
             label-color: AppTheme.status-empty;
             FolderIcon {
                 fill-color: AppTheme.status-empty;
@@ -420,13 +448,13 @@ component LegendPanel inherits Rectangle {
         }
 
         LegendRow {
-            label: "Deleted";
+            label: @tr("Deleted");
             label-color: AppTheme.status-deleted;
             DeletedIcon { }
         }
 
         LegendRow {
-            label: "Failed";
+            label: @tr("Failed");
             label-color: AppTheme.status-failed;
             FailedIcon { }
         }
@@ -434,7 +462,7 @@ component LegendPanel inherits Rectangle {
         Rectangle { }
 
         LegendRow {
-            label: "Will not be touched";
+            label: @tr("Will not be touched");
             label-color: AppTheme.text-normal;
             Rectangle {
                 width: 12px;
@@ -446,7 +474,7 @@ component LegendPanel inherits Rectangle {
         }
 
         LegendRow {
-            label: "Will be deleted";
+            label: @tr("Will be deleted");
             label-color: AppTheme.text-normal;
             Rectangle {
                 width: 12px;
@@ -458,7 +486,7 @@ component LegendPanel inherits Rectangle {
         }
 
         LegendRow {
-            label: "Protected";
+            label: @tr("Protected");
             label-color: AppTheme.text-normal;
             Rectangle {
                 width: 12px;
@@ -473,7 +501,7 @@ component LegendPanel inherits Rectangle {
 
 component DirectoryTreeRow inherits Rectangle {
     in property <DirectoryItem> item;
-    callback right-clicked(length, length, int, string);
+    callback right-clicked(length, length, int, string, int);
 
     height: 28px;
     background: row-ta.has-hover ? AppTheme.bg-hover : AppTheme.bg-main;
@@ -483,7 +511,7 @@ component DirectoryTreeRow inherits Rectangle {
     row-ta := TouchArea {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, item.id, item.path);
+                root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, item.id, item.path, item.status);
             }
         }
         double-clicked => {
@@ -538,6 +566,10 @@ component DirectoryTreeRow inherits Rectangle {
         Rectangle {
             width: 16px;
             opacity: item.is_hidden ? 0.45 : 1.0;
+            if item.is_group_header: FolderIcon {
+                y: 6px;
+                fill-color: AppTheme.primary;
+            }
             if item.is_root: HomeIcon {
                 y: 6px;
             }
@@ -571,9 +603,10 @@ component DirectoryTreeRow inherits Rectangle {
 
         Text {
             text: item.name;
-            color: item.status == 1 ? AppTheme.status-empty : (item.status == 2 ? AppTheme.status-deleted : (item.status == 3 ? AppTheme.status-protected : (item.status == 4 ? AppTheme.status-failed : AppTheme.text-normal)));
+            color: item.is_group_header ? AppTheme.primary : (item.status == 1 ? AppTheme.status-empty : (item.status == 5 ? AppTheme.status-orphaned : (item.status == 2 ? AppTheme.status-deleted : (item.status == 3 ? AppTheme.status-protected : (item.status == 4 ? AppTheme.status-failed : AppTheme.text-normal)))));
             vertical-alignment: center;
-            font-size: 12px;
+            font-size: item.is_group_header ? 13px : 12px;
+            font-weight: item.is_group_header ? 700 : 400;
         }
     }
 }
@@ -608,7 +641,7 @@ component EmptyState inherits Rectangle {
         }
 
         Text {
-            text: "No Directory Scanned";
+            text: @tr("No Directory Scanned");
             horizontal-alignment: center;
             color: #ffffff;
             font-size: 14px;
@@ -617,7 +650,7 @@ component EmptyState inherits Rectangle {
         }
 
         Text {
-            text: "Drag & Drop a folder here\nor use the browse button to select a directory";
+            text: @tr("Drag & Drop a folder here\nor use the browse button to select a directory");
             horizontal-alignment: center;
             color: AppTheme.text-muted;
             font-size: 11px;
@@ -629,10 +662,10 @@ component EmptyState inherits Rectangle {
 component FindTab inherits VerticalLayout {
     padding: 16px;
     spacing: 12px;
-    callback show-context-menu(length, length, int, string);
+    callback show-context-menu(length, length, int, string, int);
 
     Text {
-        text: "Please choose a directory to check:";
+        text: @tr("Please choose a directory to check:");
         font-size: 13px;
         font-weight: 500;
     }
@@ -646,9 +679,20 @@ component FindTab inherits VerticalLayout {
         }
 
         CustomButton {
-            text: "Browse...";
+            text: @tr("Browse...");
             primary-color: AppTheme.btn-dark;
             clicked => { AppState.selected_folder = AppState.browse_folder(); }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        height: 30px;
+        LineEdit {
+            text <=> AppState.search_text;
+            placeholder-text: "Search in tree...";
+            horizontal-stretch: 1;
+            edited => { AppState.search_changed(self.text); }
         }
     }
 
@@ -665,7 +709,7 @@ component FindTab inherits VerticalLayout {
             if AppState.directories.length > 0 || AppState.is_scanning: ListView {
                 for item in AppState.directories: DirectoryTreeRow {
                     item: item;
-                    right-clicked(x, y, id, path) => { root.show-context-menu(x, y, id, path); }
+                    right-clicked(x, y, id, path, status) => { root.show-context-menu(x, y, id, path, status); }
                 }
             }
             if AppState.directories.length == 0 && !AppState.is_scanning: EmptyState { }
@@ -678,27 +722,27 @@ component FindTab inherits VerticalLayout {
         spacing: 16px;
         height: 20px;
         Text {
-            text: "Total found: " + AppState.directories.length;
+            text: @tr("Total found: {0}", AppState.directories.length);
             vertical-alignment: center;
             font-size: 12px;
         }
 
         Text {
-            text: "Empty/Deletable: " + AppState.empty_count;
+            text: @tr("Empty/Deletable: {0}", AppState.empty_count);
             vertical-alignment: center;
             color: AppTheme.status-empty;
             font-size: 12px;
         }
 
         Text {
-            text: "Deleted: " + AppState.deleted_count;
+            text: @tr("Deleted: {0}", AppState.deleted_count);
             vertical-alignment: center;
             color: AppTheme.status-deleted;
             font-size: 12px;
         }
 
         Text {
-            text: "Failed: " + AppState.failed_count;
+            text: @tr("Failed: {0}", AppState.failed_count);
             vertical-alignment: center;
             color: AppTheme.status-failed;
             font-size: 12px;
@@ -725,28 +769,40 @@ component FindTab inherits VerticalLayout {
         spacing: 8px;
         height: 30px;
         CustomButton {
-            text: "Search";
+            text: @tr("Search");
             clicked => { AppState.search_folders(); }
             enabled: !AppState.is_scanning && !AppState.is_deleting;
         }
 
         CustomButton {
-            text: "Delete matches";
+            text: @tr("Delete matches");
             clicked => { AppState.delete_folders(); }
             enabled: !AppState.is_scanning && !AppState.is_deleting && AppState.directories.length > 0;
             primary-color: AppTheme.danger;
         }
 
         CustomButton {
-            text: "Cancel";
+            text: @tr("Cancel");
             clicked => { AppState.cancel_operation(); }
             enabled: AppState.is_scanning || AppState.is_deleting;
             primary-color: AppTheme.btn-grey;
         }
 
         CustomButton {
-            text: "Show logs";
+            text: @tr("Show logs");
             clicked => { AppState.active_tab = 3; }
+            primary-color: #333333;
+        }
+
+        CustomButton {
+            text: @tr("Export Results");
+            clicked => { AppState.export_results(); }
+            primary-color: #333333;
+        }
+
+        CustomButton {
+            text: @tr("Cached Results");
+            clicked => { AppState.load_cached_scan(); }
             primary-color: #333333;
         }
 
@@ -755,7 +811,7 @@ component FindTab inherits VerticalLayout {
         }
 
         CustomButton {
-            text: "Exit";
+            text: @tr("Exit");
             clicked => { AppState.exit_app(); }
             primary-color: AppTheme.btn-dark;
         }
@@ -768,33 +824,92 @@ component SettingsTab inherits ScrollView {
         spacing: 20px;
 
         Text {
-            text: "General Options";
+            text: @tr("General Options");
             font-weight: 700;
         }
 
         CheckBox {
-            text: "Directories with empty files will be considered empty";
+            text: @tr("Directories with empty files will be considered empty");
             checked <=> AppState.consider_empty_files_empty;
         }
 
+        HorizontalLayout {
+            Text {
+                text: @tr("Treat files up to this size (bytes) as empty:");
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            SpinBox {
+                value <=> AppState.empty_file_max_size;
+                minimum: 0;
+                width: 100px;
+                height: 35px;
+            }
+        }
+
+        HorizontalLayout {
+            Text {
+                text: @tr("Ignore files older than (hours, 0 = off):");
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            SpinBox {
+                value <=> AppState.ignore_files_older_than_hours;
+                minimum: 0;
+                width: 100px;
+                height: 35px;
+            }
+        }
+
+        HorizontalLayout {
+            Text {
+                text: @tr("Max scan results (0 = unlimited):");
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            SpinBox {
+                value <=> AppState.max_scan_results;
+                minimum: 0;
+                width: 100px;
+                height: 35px;
+            }
+        }
+
         CheckBox {
-            text: "Ignore hidden directories";
+            text: @tr("Ignore hidden directories");
             checked <=> AppState.ignore_hidden;
         }
 
         CheckBox {
-            text: "Ignore errors during deletion";
+            text: @tr("Ignore errors during deletion");
             checked <=> AppState.ignore_errors;
         }
 
         CheckBox {
-            text: "Hide search errors (like access denied errors)";
+            text: @tr("Hide search errors (like access denied errors)");
             checked <=> AppState.hide_search_errors;
         }
 
         CheckBox {
-            text: "Skip system directories (recommended)";
+            text: @tr("Skip system directories (recommended)");
             checked <=> AppState.skip_system;
+        }
+
+        CheckBox {
+            text: @tr("Protect symlinks and junctions from deletion");
+            checked <=> AppState.protect_symlinks;
         }
 
         Rectangle {
@@ -804,26 +919,50 @@ component SettingsTab inherits ScrollView {
         }
 
         Text {
-            text: "OS Integration & Logs";
+            text: @tr("OS Integration & Logs");
             font-weight: 700;
         }
 
         CheckBox {
-            text: "Integrate into Windows Explorer Context Menu";
+            text: @tr("Integrate into Windows Explorer Context Menu");
             checked <=> AppState.is_integrated;
             toggled => { AppState.toggle_context_menu(self.checked); }
         }
 
         CheckBox {
-            text: "Auto-save logs to file (%APPDATA%\\REDR\\logs\\)";
+            text: @tr("Auto-save logs to file (%APPDATA%\\REDR\\logs\\)");
             checked <=> AppState.auto_save_logs;
             toggled => { AppState.toggle_auto_save_logs(self.checked); }
         }
 
         CheckBox {
-            text: "Direct MFT Scan (NTFS & Windows Administrator only)";
+            text: @tr("Direct MFT Scan (NTFS & Windows Administrator only)");
             checked <=> AppState.mft_scan;
             enabled: AppState.is_admin;
+        }
+
+        CheckBox {
+            text: @tr("Include deleted files in MFT scan (best effort)");
+            checked <=> AppState.mft_include_deleted;
+            enabled: AppState.is_admin && AppState.mft_scan;
+        }
+
+        CheckBox {
+            text: @tr("Incremental rescan (reuse unchanged subtrees)");
+            checked <=> AppState.incremental_scan;
+        }
+
+        CheckBox {
+            text: @tr("Streaming scan (lower memory usage)");
+            checked <=> AppState.streaming_scan;
+        }
+
+        CheckBox {
+            text: @tr("Dark theme");
+            checked <=> AppState.dark_theme;
+            toggled => {
+                Palette.color-scheme = self.checked ? ColorScheme.dark : ColorScheme.light;
+            }
         }
 
         Rectangle {
@@ -833,7 +972,7 @@ component SettingsTab inherits ScrollView {
         }
 
         Text {
-            text: "Limits & Performance";
+            text: @tr("Limits & Performance");
             font-weight: 700;
         }
 
@@ -843,7 +982,7 @@ component SettingsTab inherits ScrollView {
                 spacing: 10px;
                 HorizontalLayout {
                     Text {
-                        text: "Max directory nesting depth (-1 = infinite):";
+                        text: @tr("Max directory nesting depth (-1 = infinite):");
                         vertical-alignment: center;
                     }
 
@@ -861,7 +1000,7 @@ component SettingsTab inherits ScrollView {
 
                 HorizontalLayout {
                     Text {
-                        text: "Pause between each deletion in ms:";
+                        text: @tr("Pause between each deletion in ms:");
                         vertical-alignment: center;
                     }
 
@@ -882,7 +1021,7 @@ component SettingsTab inherits ScrollView {
                 spacing: 10px;
                 HorizontalLayout {
                     Text {
-                        text: "Skip folders less than N hours old:";
+                        text: @tr("Skip folders less than N hours old:");
                         vertical-alignment: center;
                     }
 
@@ -909,25 +1048,45 @@ component SettingsTab inherits ScrollView {
         }
 
         Text {
-            text: "Delete Mode";
+            text: @tr("Delete Mode");
             font-weight: 700;
         }
 
         CheckBox {
-            text: "Simulation Mode (Dry-run - safely preview deletions)";
+            text: @tr("Simulation Mode (Dry-run - safely preview deletions)");
             checked <=> AppState.dry_run;
         }
 
         Text {
-            text: "How should empty directories be deleted?";
+            text: @tr("How should empty directories be deleted?");
             color: AppState.dry_run ? AppTheme.text-muted : AppTheme.text-normal;
         }
 
         ComboBox {
-            model: ["Delete to recycle bin and ignore errors (safer)", "Delete permanently"];
+            model: [
+                @tr("Delete to recycle bin and ignore errors (safer)"),
+                @tr("Delete permanently")
+            ];
             current-index <=> AppState.delete_mode;
             height: 35px;
-            enabled: !AppState.dry_run;
+            enabled: !AppState.dry_run && !AppState.trash_only;
+        }
+
+        CheckBox {
+            text: @tr("Trash only (never delete permanently)");
+            checked <=> AppState.trash_only;
+        }
+
+        Text {
+            text: @tr("Group results by:");
+            font-weight: 700;
+        }
+
+        ComboBox {
+            model: [@tr("Tree (default)"), @tr("Drive"), @tr("Top-level folder")];
+            current-index <=> AppState.group_by;
+            height: 35px;
+            selected => { AppState.group_mode_changed(AppState.group_by); }
         }
 
         Rectangle {
@@ -937,17 +1096,17 @@ component SettingsTab inherits ScrollView {
         }
 
         Text {
-            text: "Reset Configuration";
+            text: @tr("Reset Configuration");
             font-weight: 700;
         }
 
         Text {
-            text: "Restore all settings and filters to their default startup values.";
+            text: @tr("Restore all settings and filters to their default startup values.");
         }
 
         HorizontalLayout {
             CustomButton {
-                text: "Reset to Defaults";
+                text: @tr("Reset to Defaults");
                 primary-color: #555555;
                 clicked => { AppState.reset_defaults(); }
             }
@@ -955,6 +1114,53 @@ component SettingsTab inherits ScrollView {
             Rectangle {
                 horizontal-stretch: 1;
             }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: AppTheme.border;
+            vertical-stretch: 0;
+        }
+
+        Text {
+            text: @tr("Settings Profiles");
+            font-weight: 700;
+        }
+
+        Text {
+            text: @tr("Save the current filters and options under a name, then restore them later.");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> AppState.profile_name;
+                placeholder-text: "Profile name";
+                horizontal-stretch: 1;
+            }
+
+            CustomButton {
+                text: @tr("Save");
+                clicked => { AppState.save_profile(AppState.profile_name); }
+            }
+
+            CustomButton {
+                text: @tr("Load");
+                primary-color: AppTheme.btn-dark;
+                clicked => { AppState.load_profile(AppState.profile_name); }
+            }
+
+            CustomButton {
+                text: @tr("Delete");
+                primary-color: #555555;
+                clicked => { AppState.delete_profile(AppState.profile_name); }
+            }
+        }
+
+        Text {
+            text: AppState.profile_list;
+            font-size: 11px;
+            color: AppTheme.text-muted;
         }
 
         Rectangle {
@@ -970,7 +1176,7 @@ component FiltersTab inherits HorizontalLayout {
         spacing: 10px;
         horizontal-stretch: 1;
         Text {
-            text: "Directories to Ignore (One per line):";
+            text: @tr("Directories to Ignore (One per line):");
             font-weight: 700;
         }
 
@@ -984,12 +1190,26 @@ component FiltersTab inherits HorizontalLayout {
         spacing: 10px;
         horizontal-stretch: 1;
         Text {
-            text: "Filenames to Ignore (One per line, e.g., *.tmp):";
+            text: @tr("Filenames to Ignore (One per line, e.g., *.tmp):");
             font-weight: 700;
         }
 
         TextEdit {
             text <=> AppState.ignore_files_text;
+            vertical-stretch: 1;
+        }
+    }
+
+    VerticalLayout {
+        spacing: 10px;
+        horizontal-stretch: 1;
+        Text {
+            text: @tr("Protected Paths (never deleted, one per line):");
+            font-weight: 700;
+        }
+
+        TextEdit {
+            text <=> AppState.whitelist_text;
             vertical-stretch: 1;
         }
     }
@@ -1008,14 +1228,20 @@ component LogTab inherits VerticalLayout {
         spacing: 8px;
         height: 30px;
         CustomButton {
-            text: "Export Log...";
+            text: @tr("Export Log...");
             clicked => { AppState.export_log(); }
         }
 
         CustomButton {
-            text: "Open Logs Folder";
+            text: @tr("Open Logs Folder");
             primary-color: AppTheme.btn-dark;
             clicked => { AppState.open_logs_folder(); }
+        }
+
+        CustomButton {
+            text: @tr("Restore Deleted");
+            primary-color: AppTheme.btn-dark;
+            clicked => { AppState.restore_deleted(); }
         }
 
         Rectangle {
@@ -1025,13 +1251,15 @@ component LogTab inherits VerticalLayout {
 }
 
 export component AppWindow inherits Window {
-    title: "REDR - Da Red 'Unz Go Fasta!";
+    title: @tr("REDR - Da Red 'Unz Go Fasta!");
     icon: @image-url("../assets/icon.png");
     min-width: 850px;
     min-height: 650px;
     background: AppTheme.bg-main;
 
-    init => { Palette.color-scheme = ColorScheme.dark; }
+    init => {
+        Palette.color-scheme = AppState.dark_theme ? ColorScheme.dark : ColorScheme.light;
+    }
 
     property <length> cm_x;
     property <length> cm_y;
@@ -1074,7 +1302,7 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "Exclude Folder Name";
+                            text: @tr("Exclude Folder Name");
                             color: #ffffff;
                             vertical-alignment: center;
                             font-size: 11px;
@@ -1104,7 +1332,7 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "Exclude Full Path";
+                            text: @tr("Exclude Full Path");
                             color: #ffffff;
                             vertical-alignment: center;
                             font-size: 11px;
@@ -1136,7 +1364,38 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "Open in File Explorer";
+                            text: @tr("Open in File Explorer");
+                            color: #ffffff;
+                            vertical-alignment: center;
+                            font-size: 11px;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 22px;
+                    visible: AppState.selected_context_item_status == 2;
+                    background: rs-ta.has-hover ? AppTheme.primary : transparent;
+                    border-radius: 2px;
+                    rs-ta := TouchArea {
+                        clicked => {
+                            context_menu.close();
+                            AppState.restore_context_item();
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        spacing: 8px;
+                        alignment: start;
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            DeletedIcon { }
+                        }
+
+                        Text {
+                            text: @tr("Restore This Folder");
                             color: #ffffff;
                             vertical-alignment: center;
                             font-size: 11px;
@@ -1147,58 +1406,73 @@ export component AppWindow inherits Window {
         }
     }
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        HorizontalLayout {
-            spacing: 4px;
-            alignment: start;
-            height: 32px;
-            TabButton {
-                text: "Find";
-                active: AppState.active_tab == 0;
-                clicked => { AppState.active_tab = 0; }
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == "F5") {
+                AppState.search_folders();
+                return accept;
             }
-
-            TabButton {
-                text: "Settings";
-                active: AppState.active_tab == 1;
-                clicked => { AppState.active_tab = 1; }
+            if (event.modifiers.control && (event.text == "d" || event.text == "D")) {
+                AppState.delete_folders();
+                return accept;
             }
-
-            TabButton {
-                text: "Filters";
-                active: AppState.active_tab == 2;
-                clicked => { AppState.active_tab = 2; }
-            }
-
-            TabButton {
-                text: "Log";
-                active: AppState.active_tab == 3;
-                clicked => { AppState.active_tab = 3; }
-            }
+            reject
         }
 
-        Rectangle {
-            background: AppTheme.bg-panel;
-            border-color: AppTheme.border;
-            border-width: 1px;
-            border-radius: 6px;
-            vertical-stretch: 1;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
 
-            if AppState.active_tab == 0: FindTab {
-                show-context-menu(x, y, id, path) => {
-                    AppState.selected_context_item_id = id;
-                    AppState.selected_context_item_path = path;
-                    root.cm_x = x;
-                    root.cm_y = y;
-                    context_menu.show();
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                height: 32px;
+                TabButton {
+                    text: @tr("Find");
+                    active: AppState.active_tab == 0;
+                    clicked => { AppState.active_tab = 0; }
+                }
+
+                TabButton {
+                    text: @tr("Settings");
+                    active: AppState.active_tab == 1;
+                    clicked => { AppState.active_tab = 1; }
+                }
+
+                TabButton {
+                    text: @tr("Filters");
+                    active: AppState.active_tab == 2;
+                    clicked => { AppState.active_tab = 2; }
+                }
+
+                TabButton {
+                    text: @tr("Log");
+                    active: AppState.active_tab == 3;
+                    clicked => { AppState.active_tab = 3; }
                 }
             }
-            if AppState.active_tab == 1: SettingsTab { }
-            if AppState.active_tab == 2: FiltersTab { }
-            if AppState.active_tab == 3: LogTab { }
+
+            Rectangle {
+                background: AppTheme.bg-panel;
+                border-color: AppTheme.border;
+                border-width: 1px;
+                border-radius: 6px;
+                vertical-stretch: 1;
+
+                if AppState.active_tab == 0: FindTab {
+                    show-context-menu(x, y, id, path, status) => {
+                        AppState.selected_context_item_id = id;
+                        AppState.selected_context_item_path = path;
+                        AppState.selected_context_item_status = status;
+                        root.cm_x = x;
+                        root.cm_y = y;
+                        context_menu.show();
+                    }
+                }
+                if AppState.active_tab == 1: SettingsTab { }
+                if AppState.active_tab == 2: FiltersTab { }
+                if AppState.active_tab == 3: LogTab { }
+            }
         }
     }
 }

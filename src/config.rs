@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 /// Complete persistent configuration struct mapped to settings.json
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -21,8 +21,19 @@ pub struct AppSettings {
     pub min_age_hours: i32,
     pub auto_save_logs: bool,
     pub mft_scan: bool,
+    pub mft_include_deleted: bool,
+    pub empty_file_max_size: u64,
+    pub ignore_files_older_than_hours: u32,
+    pub max_scan_results: usize,
+    pub protect_symlinks: bool,
     pub ignore_list_text: String,
     pub ignore_files_text: String,
+    pub whitelist_text: String,
+    pub trash_only: bool,
+    pub group_by: i32,
+    pub dark_theme: bool,
+    pub incremental_scan: bool,
+    pub streaming_scan: bool,
     pub dry_run: bool,
 }
 
@@ -41,9 +52,20 @@ impl Default for AppSettings {
             min_age_hours: 0,
             auto_save_logs: false,
             mft_scan: false,
+            mft_include_deleted: false,
+            empty_file_max_size: 0,
+            ignore_files_older_than_hours: 0,
+            max_scan_results: 0,
+            protect_symlinks: true,
             ignore_list_text: get_default_ignore_dirs(),
             ignore_files_text: "desktop.ini\nThumbs.db\n.DS_Store".to_string(),
-            dry_run: false,
+            whitelist_text: get_default_whitelist(),
+            trash_only: false,
+            group_by: 0,
+            dark_theme: true,
+            incremental_scan: true,
+            streaming_scan: true,
+            dry_run: true,
         }
     }
 }
@@ -88,6 +110,30 @@ pub fn get_default_ignore_dirs() -> String {
         ignore_dirs.push("AppData\\Local\\Packages".to_string());
     }
     ignore_dirs.join("\n")
+}
+
+/// Generates the default whitelist: system locations that must never be deleted
+pub fn get_default_whitelist() -> String {
+    let mut entries: Vec<String> = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        for sub in [
+            "\\Windows",
+            "\\Program Files",
+            "\\Program Files (x86)",
+            "\\ProgramData",
+            "\\System Volume Information",
+            "\\$Recycle.Bin",
+            "\\Recovery",
+            "\\Users\\All Users",
+            "\\Users\\Default",
+        ] {
+            entries.push(format!("{}{}", system_drive, sub));
+        }
+    }
+
+    entries.join("\n")
 }
 
 /// Automatically injects missing VCS/package manager guard exclusions during config upgrades
@@ -138,4 +184,75 @@ pub fn load_settings() -> AppSettings {
         }
     }
     AppSettings::default()
+}
+
+// ==========================================
+// SETTINGS PROFILES
+// ==========================================
+
+/// A named snapshot of the scan configuration the user can switch between.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SettingsProfile {
+    pub name: String,
+    pub settings: AppSettings,
+}
+
+/// Returns the directory where profiles are stored.
+pub fn get_profiles_path() -> Option<PathBuf> {
+    get_config_dir().map(|d| d.join("profiles.json"))
+}
+
+/// Loads every saved profile, newest configuration version first.
+pub fn load_profiles() -> Vec<SettingsProfile> {
+    let Some(path) = get_profiles_path() else {
+        return Vec::new();
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<SettingsProfile>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Writes the full profile list back to disk.
+pub fn save_profiles(profiles: &[SettingsProfile]) -> Result<(), String> {
+    let path = get_profiles_path().ok_or_else(|| "Config dir not found".to_string())?;
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(profiles).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Creates or replaces a profile with the given name.
+pub fn save_profile(name: &str, settings: &AppSettings) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+    let mut profiles = load_profiles();
+    profiles.retain(|p| !p.name.eq_ignore_ascii_case(name));
+    profiles.push(SettingsProfile {
+        name: name.to_string(),
+        settings: settings.clone(),
+    });
+    save_profiles(&profiles)
+}
+
+/// Removes a profile by name; returns true when something was removed.
+pub fn delete_profile(name: &str) -> bool {
+    let mut profiles = load_profiles();
+    let before = profiles.len();
+    profiles.retain(|p| !p.name.eq_ignore_ascii_case(name.trim()));
+    if profiles.len() == before {
+        return false;
+    }
+    let _ = save_profiles(&profiles);
+    true
+}
+
+/// Looks a profile up by name.
+pub fn find_profile(name: &str) -> Option<SettingsProfile> {
+    load_profiles()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name.trim()))
 }

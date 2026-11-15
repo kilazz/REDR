@@ -8,17 +8,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TERM_VERBOSE: false
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
 jobs:
-  build:
+  check:
     runs-on: windows-latest
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    # No protoc needed for this workspace.
 
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
@@ -37,3 +35,36 @@ jobs:
 
     - name: Run tests
       run: cargo test --workspace --verbose
+
+    - name: Check the dependency tree
+      run: cargo tree --duplicates
+
+  build:
+    needs: check
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build
+      run: cargo build --workspace --profile ${{ matrix.profile }}
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: REDR-${{ matrix.profile }}
+        path: target/${{ matrix.profile }}/REDR.exe
+        if-no-files-found: error
