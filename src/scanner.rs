@@ -88,11 +88,7 @@ impl DirFilter {
         }
 
         // 2. Fallback to path and wildcard patterns
-        if !self.wildcards.is_empty() && self.wildcards.iter().any(|m| m.matches(full_path_lower)) {
-            return true;
-        }
-
-        false
+        !self.wildcards.is_empty() && self.wildcards.iter().any(|m| m.matches(full_path_lower))
     }
 }
 
@@ -469,15 +465,71 @@ pub fn scan_empty_dirs(
 }
 
 #[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+fn mark_occupied_ancestors(file_lower: &str, root_lower: &str, occupied: &mut FxHashSet<String>) {
+    let mut current = file_lower;
+    while let Some(idx) = current.rfind('\\') {
+        let mut parent = &current[..idx];
+        if parent.ends_with(':') {
+            parent = &current[..idx + 1];
+        }
+
+        if parent.is_empty() || occupied.contains(parent) {
+            break;
+        }
+        occupied.insert(parent.to_string());
+
+        if parent == root_lower || parent.ends_with(":\\") {
+            break;
+        }
+        current = parent;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn include_ancestor_dirs(
+    dir_lower: &str,
+    root_lower: &str,
+    all_dirs: &FxHashMap<String, PathBuf>,
+    included: &mut FxHashSet<PathBuf>,
+) {
+    let mut current = dir_lower;
+    while let Some(idx) = current.rfind('\\') {
+        let mut parent = &current[..idx];
+        if parent.ends_with(':') {
+            parent = &current[..idx + 1];
+        }
+
+        if parent == root_lower || !parent.starts_with(root_lower) {
+            break;
+        }
+
+        let inserted = if let Some(exact_parent) = all_dirs.get(parent) {
+            included.insert(exact_parent.clone())
+        } else {
+            included.insert(PathBuf::from(parent))
+        };
+        if !inserted {
+            break;
+        }
+
+        if parent.ends_with(":\\") {
+            break;
+        }
+        current = parent;
+    }
+}
+
 pub fn scan_empty_dirs_mft(
     root: &Path,
     settings: &ScanSettings,
     log: &dyn Fn(&str),
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<Vec<DirectoryNode>, String> {
-    use ntfs_reader::file_info::FileInfo;
-    use ntfs_reader::mft::Mft;
-    use ntfs_reader::volume::Volume;
+    use ntfs_reader::DefaultPathCache;
+    use ntfs_reader::FileInfo;
+    use ntfs_reader::Mft;
+    use ntfs_reader::Volume;
     use std::path::Component;
 
     log("[*] Initializing Direct MFT Scan...");
@@ -523,8 +575,8 @@ pub fn scan_empty_dirs_mft(
         ));
     }
 
-    let volume_path = format!("\\\\.\\{}:", drive_letter);
-    let volume = Volume::new(&volume_path).map_err(|e| {
+    let ntfs_volume_path = format!("\\\\.\\{}:", drive_letter);
+    let volume = Volume::new(&ntfs_volume_path).map_err(|e| {
         format!(
             "Failed to open NTFS volume (Requires Administrator privileges): {}",
             e
@@ -562,20 +614,40 @@ pub fn scan_empty_dirs_mft(
         }
     };
 
+    let mut path_cache = DefaultPathCache::new();
+
+    // Convert an NTFS volume path (`\\.\C:\dir`) to an ordinary Win32 path (`C:\dir`).
+    let ntfs_volume_path_buf = PathBuf::from(&ntfs_volume_path);
+    let win_root = PathBuf::from(format!("{}:\\", drive_letter));
+    let to_win_path = |raw_path: &Path| -> PathBuf {
+        if let Ok(rel) = raw_path.strip_prefix(&ntfs_volume_path_buf) {
+            let trimmed = rel.to_string_lossy().trim_start_matches('\\').to_string();
+            if trimmed.is_empty() {
+                win_root.clone()
+            } else {
+                win_root.join(trimmed)
+            }
+        } else if raw_path.starts_with(&win_root) {
+            raw_path.to_path_buf()
+        } else {
+            let clean = raw_path.strip_prefix("\\").unwrap_or(raw_path);
+            win_root.join(clean)
+        }
+    };
+
     for file in mft.files() {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err("Operation cancelled by user".to_string());
         }
 
-        let info = FileInfo::new(&mft, &file);
-        let raw_path = info.path;
+        let info = FileInfo::with_cache(&file, &mut path_cache);
 
-        let path_with_drive = if raw_path.starts_with(format!("{}:\\", drive_letter)) {
-            raw_path
-        } else {
-            let clean = raw_path.strip_prefix("\\").unwrap_or(&raw_path);
-            PathBuf::from(format!("{}:\\", drive_letter)).join(clean)
+        let raw_path = match info.path {
+            Some(p) => p,
+            None => continue,
         };
+
+        let path_with_drive = to_win_path(&raw_path);
 
         let p_lower = lowercase_path(&path_with_drive);
 
@@ -594,23 +666,7 @@ pub fn scan_empty_dirs_mft(
             let is_ignored = file_matchers.iter().any(|m| m.matches(&child_name));
 
             if !is_ignored {
-                let mut current_path: &str = &p_lower;
-                while let Some(idx) = current_path.rfind('\\') {
-                    let mut parent_path = &current_path[..idx];
-                    if parent_path.ends_with(':') {
-                        parent_path = &current_path[..idx + 1];
-                    }
-
-                    if parent_path.is_empty() || occupied_dirs.contains(parent_path) {
-                        break;
-                    }
-                    occupied_dirs.insert(parent_path.to_string());
-
-                    if parent_path == root_lower_str || parent_path.ends_with(":\\") {
-                        break;
-                    }
-                    current_path = parent_path;
-                }
+                mark_occupied_ancestors(&p_lower, &root_lower_str, &mut occupied_dirs);
             }
         }
     }
@@ -636,30 +692,7 @@ pub fn scan_empty_dirs_mft(
             empty_dirs_found.insert(p_lower.clone());
             included_dirs.insert(p.clone());
 
-            let mut current_path: &str = p_lower;
-            while let Some(idx) = current_path.rfind('\\') {
-                let mut parent_path = &current_path[..idx];
-                if parent_path.ends_with(':') {
-                    parent_path = &current_path[..idx + 1];
-                }
-
-                if parent_path == root_lower_str || !parent_path.starts_with(&root_lower_str) {
-                    break;
-                }
-
-                if let Some(exact_parent) = all_dirs.get(parent_path) {
-                    if !included_dirs.insert(exact_parent.clone()) {
-                        break;
-                    }
-                } else if !included_dirs.insert(PathBuf::from(parent_path)) {
-                    break;
-                }
-
-                if parent_path.ends_with(":\\") {
-                    break;
-                }
-                current_path = parent_path;
-            }
+            include_ancestor_dirs(p_lower, &root_lower_str, &all_dirs, &mut included_dirs);
         }
     }
 
