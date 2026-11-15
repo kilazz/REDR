@@ -17,8 +17,11 @@ pub struct CachedScan {
     pub root: String,
     /// Unix timestamp of the scan.
     pub timestamp: u64,
-    /// Empty directories found, with their status.
-    pub empty_dirs: BTreeMap<String, i32>,
+    /// Every reported directory with its status, the parents included.
+    ///
+    /// The tree needs the parents of the empty directories as well, so all
+    /// reported directories are kept here.
+    pub all_dirs: BTreeMap<String, i32>,
     /// Modification time of every visited directory, used to decide which
     /// subtrees can be reused during an incremental rescan.
     pub dir_stamps: BTreeMap<String, u64>,
@@ -36,14 +39,29 @@ pub struct CachedScan {
     pub dir_child_counts: BTreeMap<String, usize>,
 }
 
+/// The statuses of a directory that make it a removal candidate.
+const DELETABLE: [i32; 2] = [
+    super::NodeStatus::Empty as i32,
+    super::NodeStatus::Orphaned as i32,
+];
+
 impl CachedScan {
+    /// The empty directories of the scan, with their status.
+    pub fn empty_dirs(&self) -> BTreeMap<String, i32> {
+        self.all_dirs
+            .iter()
+            .filter(|(_, status)| DELETABLE.contains(status))
+            .map(|(path, status)| (path.clone(), *status))
+            .collect()
+    }
+
     /// Converts the cache into its binary representation.
     fn to_binary(&self) -> BinaryCache {
         BinaryCache {
             root: self.root.clone(),
             timestamp: self.timestamp,
             settings_hash: self.settings_hash,
-            empty_dirs: self.empty_dirs.clone(),
+            all_dirs: self.all_dirs.clone(),
             dir_stamps: self.dir_stamps.clone(),
             dir_states: self.dir_states.clone(),
             dir_depths: self.dir_depths.clone(),
@@ -57,7 +75,7 @@ impl CachedScan {
             root: cache.root,
             timestamp: cache.timestamp,
             settings_hash: cache.settings_hash,
-            empty_dirs: cache.empty_dirs,
+            all_dirs: cache.all_dirs,
             dir_stamps: cache.dir_stamps,
             dir_states: cache.dir_states,
             dir_depths: cache.dir_depths,
@@ -119,10 +137,10 @@ pub fn load(root: &Path) -> Option<CachedScan> {
 
 /// Stores the result of a scan of `root`.
 ///
-/// Only the empty directories are updated: the directory metadata of a
-/// previous run is kept, so the incremental rescan can still reuse it. A stale
-/// stamp is harmless, the rescan compares it with the current one.
-pub fn store(root: &Path, empty_dirs: &[(String, i32)]) {
+/// Only the reported directories are kept; the metadata of the previous run
+/// is dropped, because without fresh modification times it must not be used to
+/// skip directories during an incremental rescan.
+pub fn store(root: &Path, all_dirs: &[(String, i32)]) {
     let Some(path) = cache_file() else {
         return;
     };
@@ -130,16 +148,13 @@ pub fn store(root: &Path, empty_dirs: &[(String, i32)]) {
     let mut cache = load(root).unwrap_or_default();
     cache.root = root.to_string_lossy().into_owned();
     cache.timestamp = chrono::Utc::now().timestamp() as u64;
-    cache.empty_dirs = empty_dirs.iter().cloned().collect();
+    cache.all_dirs = all_dirs.iter().cloned().collect();
 
-    // Every result must be in the directory table, otherwise the binary
-    // format cannot refer to it.
-    for path in cache.empty_dirs.keys() {
-        cache.dir_states.entry(path.clone()).or_insert(0);
-        cache.dir_depths.entry(path.clone()).or_insert(0);
-        cache.dir_stamps.entry(path.clone()).or_insert(0);
-        cache.dir_child_counts.entry(path.clone()).or_insert(0);
-    }
+    // The metadata of the previous run is stale now, so it is dropped.
+    cache.dir_stamps.clear();
+    cache.dir_states.clear();
+    cache.dir_depths.clear();
+    cache.dir_child_counts.clear();
 
     let _ = binary_cache::write_file(&path, &cache.to_binary());
 }
@@ -172,11 +187,9 @@ impl ScanDelta {
 /// Compares the current scan with the cached one.
 pub fn diff(cached: &CachedScan, current: &[(String, i32)]) -> ScanDelta {
     let current_map: BTreeMap<&str, i32> = current.iter().map(|(p, s)| (p.as_str(), *s)).collect();
-    let cached_map: BTreeMap<&str, i32> = cached
-        .empty_dirs
-        .iter()
-        .map(|(p, s)| (p.as_str(), *s))
-        .collect();
+    let cached_empty = cached.empty_dirs();
+    let cached_map: BTreeMap<&str, i32> =
+        cached_empty.iter().map(|(p, s)| (p.as_str(), *s)).collect();
 
     let mut delta = ScanDelta::default();
     for path in current_map.keys() {
@@ -210,13 +223,13 @@ mod tests {
 
     #[test]
     fn diff_reports_new_and_removed_entries() {
-        let mut empty_dirs = BTreeMap::new();
-        empty_dirs.insert("c:\\a".to_string(), 1);
-        empty_dirs.insert("c:\\b".to_string(), 1);
+        let mut all_dirs = BTreeMap::new();
+        all_dirs.insert("c:\\a".to_string(), 1);
+        all_dirs.insert("c:\\b".to_string(), 1);
         let cached = CachedScan {
             root: "c:\\".to_string(),
             timestamp: 0,
-            empty_dirs,
+            all_dirs,
             ..Default::default()
         };
 
@@ -226,5 +239,24 @@ mod tests {
         assert_eq!(delta.newly_empty, vec!["c:\\c".to_string()]);
         assert_eq!(delta.no_longer_empty, vec!["c:\\b".to_string()]);
         assert_eq!(delta.unchanged, 1);
+    }
+
+    #[test]
+    fn only_the_deletable_directories_count_as_empty() {
+        let mut all_dirs = BTreeMap::new();
+        all_dirs.insert("c:\\empty".to_string(), 1);
+        all_dirs.insert("c:\\orphan".to_string(), 5);
+        all_dirs.insert("c:\\parent".to_string(), 0);
+
+        let cache = CachedScan {
+            all_dirs,
+            ..Default::default()
+        };
+        let empty = cache.empty_dirs();
+
+        assert_eq!(empty.len(), 2);
+        assert!(empty.contains_key("c:\\empty"));
+        assert!(empty.contains_key("c:\\orphan"));
+        assert!(!empty.contains_key("c:\\parent"));
     }
 }

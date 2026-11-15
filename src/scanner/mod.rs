@@ -55,7 +55,9 @@ pub fn nodes_from_cached(entries: &[(String, i32)], root: &Path) -> Vec<Director
         })
         .collect();
 
-    nodes.sort_by(|a, b| a.path_str.cmp(&b.path_str));
+    // Sort by path components, so the parents come before their children and
+    // the tree keeps its order.
+    nodes.sort_by(|a, b| a.path.cmp(&b.path));
     compute_tree_relationships(&mut nodes);
     nodes
 }
@@ -298,29 +300,58 @@ fn add_ancestors(included: &mut FxHashSet<Arc<Path>>, start: &Path, root: &Path)
     }
 }
 
+/// Derives the tree relationships of a depth-first ordered list.
+///
+/// The list has to be in tree order: a directory, then its children, then the
+/// next sibling.
 fn compute_tree_relationships(nodes: &mut [DirectoryNode]) {
     if nodes.is_empty() {
         return;
     }
 
-    for i in 0..nodes.len() {
-        if i + 1 < nodes.len() && nodes[i + 1].depth > nodes[i].depth {
-            nodes[i].has_children = true;
+    // Count the children of every parent, so the last one can be found. The
+    // siblings of a directory are not next to each other in the list: the
+    // children of the first sibling come first.
+    let mut children_left: FxHashMap<PathBuf, usize> = FxHashMap::default();
+    for node in nodes.iter() {
+        if let Some(parent) = node.path.parent() {
+            *children_left.entry(parent.to_path_buf()).or_insert(0) += 1;
         }
     }
 
-    let mut seen_depths: FxHashSet<i32> = FxHashSet::default();
-    let mut prev_depth = i32::MAX;
+    for i in 0..nodes.len() {
+        let path = nodes[i].path.clone();
+        let next = nodes.get(i + 1);
 
-    for i in (0..nodes.len()).rev() {
-        let depth = nodes[i].depth;
-        if depth < prev_depth {
-            seen_depths.retain(|&d| d <= depth);
+        // The next node is a child when it is deeper and lives under this node.
+        let has_children = next
+            .map(|n| n.depth > nodes[i].depth && n.path.parent() == Some(path.as_ref()))
+            .unwrap_or(false);
+
+        // The node is the last of its siblings when it is the last child of its
+        // parent.
+        let is_last_sibling = match path.parent() {
+            Some(parent) => match children_left.get_mut(parent) {
+                Some(left) => {
+                    *left -= 1;
+                    *left == 0
+                }
+                None => true,
+            },
+            None => true,
+        };
+
+        nodes[i].has_children = has_children;
+        nodes[i].is_last_sibling = is_last_sibling;
+
+        // The root of the scan is only the starting point of the search: it is
+        // never a removal candidate, even when every directory below it is
+        // empty.
+        if nodes[i].depth == 0
+            && matches!(nodes[i].status, NodeStatus::Empty | NodeStatus::Orphaned)
+        {
+            nodes[i].status = NodeStatus::Normal;
         }
-
-        nodes[i].is_last_sibling = seen_depths.insert(depth);
-
-        prev_depth = depth;
     }
 }
 

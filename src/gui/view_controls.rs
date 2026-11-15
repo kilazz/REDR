@@ -39,7 +39,7 @@ pub fn register(state: &GuiState, app_state: &AppState) {
         };
 
         let entries: Vec<(String, i32)> = cached
-            .empty_dirs
+            .all_dirs
             .iter()
             .map(|(p, s)| (p.clone(), *s))
             .collect();

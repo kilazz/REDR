@@ -140,6 +140,53 @@ fn default_whitelist_covers_system_directories() {
 }
 
 #[test]
+fn the_tree_knows_the_children_and_the_last_sibling() {
+    let root = temp_dir("relations");
+    // root
+    // ├── a
+    // │   ├── a1
+    // │   └── a2
+    // └── b
+    fs::create_dir_all(root.join("a").join("a1")).unwrap();
+    fs::create_dir_all(root.join("a").join("a2")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = scan_empty_dirs(&root, &settings(), &cancel).unwrap();
+
+    let find = |name: &str| {
+        result
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing"))
+    };
+
+    // The root has children.
+    assert!(find(&root.to_string_lossy()).has_children);
+
+    // "a" has children, "b" does not.
+    assert!(find("a").has_children);
+    assert!(!find("b").has_children);
+
+    // "a" is followed by "b", so it is not the last of its siblings.
+    assert!(!find("a").is_last_sibling);
+    assert!(find("b").is_last_sibling);
+
+    // The last child of "a" is "a2".
+    assert!(!find("a1").is_last_sibling);
+    assert!(find("a2").is_last_sibling);
+
+    // The tree keeps its order: a parent comes before its children.
+    let names: Vec<&str> = result.iter().map(|n| n.name.as_str()).collect();
+    let pos = |name: &str| names.iter().position(|n| *n == name).unwrap();
+    assert!(pos("a") < pos("a1"));
+    assert!(pos("a1") < pos("a2"));
+    assert!(pos("a2") < pos("b"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn profile_roundtrip() {
     let name = format!("redr_test_profile_{}", std::process::id());
     let settings = config::AppSettings {

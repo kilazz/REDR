@@ -124,3 +124,68 @@ fn settings_fingerprint_changes_with_settings() {
     b.max_depth = 5;
     assert_ne!(a, cache::settings_fingerprint(&b));
 }
+
+#[test]
+fn the_streaming_scan_produces_a_properly_ordered_tree() {
+    let root = temp_dir("tree_order");
+    fs::create_dir_all(root.join("a").join("b")).unwrap();
+    fs::create_dir_all(root.join("a.txt")).unwrap();
+    fs::create_dir_all(root.join("z")).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut nodes = Vec::new();
+    scan_streaming(&root, &settings(), &cancel, &mut |node| nodes.push(node)).unwrap();
+
+    // The parent has to come before its children.
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node.path.parent()
+            && node.path.as_ref() != root
+            && let Some(parent_index) = nodes.iter().position(|n| n.path.as_ref() == parent)
+        {
+            assert!(
+                parent_index < i,
+                "{} comes after its parent {}",
+                node.path_str,
+                parent.display()
+            );
+        }
+    }
+
+    // The children of a directory have to be next to each other.
+    for (i, node) in nodes.iter().enumerate() {
+        let Some(parent) = node.path.parent() else {
+            continue;
+        };
+        let mut j = i + 1;
+        while j < nodes.len() && nodes[j].path.parent() == Some(parent) {
+            j += 1;
+        }
+        for node in &nodes[(i + 1)..j] {
+            assert_eq!(
+                node.path.parent(),
+                Some(parent),
+                "{} interrupts the children of {}",
+                node.path_str,
+                parent.display()
+            );
+        }
+    }
+
+    // The depth has to be relative to the scanned root.
+    assert_eq!(nodes.first().map(|n| n.depth), Some(0));
+    for node in &nodes {
+        if let Some(parent) = node.path.parent()
+            && node.path.as_ref() != root
+            && let Some(parent_node) = nodes.iter().find(|n| n.path.as_ref() == parent)
+        {
+            assert_eq!(
+                node.depth,
+                parent_node.depth + 1,
+                "{} has the wrong depth",
+                node.path_str
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}

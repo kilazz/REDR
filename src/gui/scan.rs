@@ -115,7 +115,13 @@ pub fn register(state: &GuiState, app_state: &AppState) {
                             ));
                         }
                     }
-                    scanner::cache::store(&path, &current);
+                    // The whole tree is cached, so the result can be shown again
+                    // without scanning.
+                    let reported: Vec<(String, i32)> = empty_dirs
+                        .iter()
+                        .map(|d| (d.path_str.clone(), d.status as i32))
+                        .collect();
+                    scanner::cache::store(&path, &reported);
 
                     let folders_guard = {
                         let mut folders = state.folders.lock().unwrap();

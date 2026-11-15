@@ -85,20 +85,15 @@ pub fn rescan(
     // The directories that were visited again.
     let rescanned = nodes.len().saturating_sub(reused_before);
 
-    let empty_dirs: Vec<(String, i32)> = nodes
+    let all_dirs: Vec<(String, i32)> = nodes
         .iter()
-        .filter(|n| {
-            n.status == NodeStatus::Empty
-                || n.status == NodeStatus::Orphaned
-                || n.status == NodeStatus::Protected
-        })
         .map(|n| (n.path_str.clone(), n.status as i32))
         .collect();
 
     let cache = CachedScan {
         root: root.to_string_lossy().into_owned(),
         timestamp: chrono::Utc::now().timestamp() as u64,
-        empty_dirs: empty_dirs.iter().cloned().collect(),
+        all_dirs: all_dirs.iter().cloned().collect(),
         dir_stamps,
         dir_states,
         dir_depths,

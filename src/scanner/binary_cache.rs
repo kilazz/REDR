@@ -30,6 +30,9 @@
 //!   path index: u32
 //!   status:     i32
 //! ```
+//!
+//! The results hold every reported directory, the parents included, so the
+//! tree can be rebuilt from the cache.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,8 +53,8 @@ pub struct BinaryCache {
     pub timestamp: u64,
     /// The fingerprint of the settings the scan was made with.
     pub settings_hash: u64,
-    /// The empty directories and their status.
-    pub empty_dirs: BTreeMap<String, i32>,
+    /// Every reported directory with its status, parents included.
+    pub all_dirs: BTreeMap<String, i32>,
     /// The modification time of every visited directory.
     pub dir_stamps: BTreeMap<String, u64>,
     /// The state of every visited directory.
@@ -67,7 +70,7 @@ impl BinaryCache {
     fn paths(&self) -> Vec<&String> {
         let mut paths: Vec<&String> = self.dir_states.keys().collect();
         // The results may mention a directory that has no state yet.
-        for path in self.empty_dirs.keys() {
+        for path in self.all_dirs.keys() {
             if !paths.contains(&path) {
                 paths.push(path);
             }
@@ -137,7 +140,7 @@ pub fn read<R: Read>(reader: R) -> Result<BinaryCache, String> {
             .insert(path.clone(), child_count as usize);
     }
 
-    // The directories that were found empty, as an index into the table.
+    // The reported directories, as an index into the table above.
     let result_count = read_u32(&mut reader)?;
     for _ in 0..result_count {
         let index = read_u32(&mut reader)? as usize;
@@ -145,7 +148,7 @@ pub fn read<R: Read>(reader: R) -> Result<BinaryCache, String> {
         let path = paths
             .get(index)
             .ok_or_else(|| format!("The result index {} is out of range", index))?;
-        cache.empty_dirs.insert(path.clone(), status);
+        cache.all_dirs.insert(path.clone(), status);
     }
 
     Ok(cache)
@@ -206,11 +209,12 @@ pub fn write<W: Write>(writer: W, cache: &BinaryCache) -> Result<(), String> {
             .map_err(|e| format!("Cannot write the child count: {}", e))?;
     }
 
-    // The directories that were found empty.
+    // The reported directories.
     writer
-        .write_all(&(cache.empty_dirs.len() as u32).to_le_bytes())
+        .write_all(&(cache.all_dirs.len() as u32).to_le_bytes())
         .map_err(|e| format!("Cannot write the result count: {}", e))?;
-    for (path, status) in &cache.empty_dirs {
+
+    for (path, status) in &cache.all_dirs {
         let index = index_of
             .get(path.as_str())
             .copied()
@@ -308,7 +312,7 @@ mod tests {
         cache.dir_depths.insert("c:\\temp\\a".to_string(), 1);
         cache.dir_stamps.insert("c:\\temp\\a".to_string(), 12345);
         cache.dir_child_counts.insert("c:\\temp\\a".to_string(), 2);
-        cache.empty_dirs.insert("c:\\temp\\a".to_string(), 1);
+        cache.all_dirs.insert("c:\\temp\\a".to_string(), 1);
         cache
     }
 
@@ -325,7 +329,7 @@ mod tests {
         assert_eq!(restored.dir_depths, original.dir_depths);
         assert_eq!(restored.dir_stamps, original.dir_stamps);
         assert_eq!(restored.dir_child_counts, original.dir_child_counts);
-        assert_eq!(restored.empty_dirs, original.empty_dirs);
+        assert_eq!(restored.all_dirs, original.all_dirs);
     }
 
     #[test]
@@ -345,11 +349,11 @@ mod tests {
     #[test]
     fn a_result_without_a_state_is_still_stored() {
         let mut cache = BinaryCache::default();
-        cache.empty_dirs.insert("c:\\only".to_string(), 1);
+        cache.all_dirs.insert("c:\\only".to_string(), 1);
 
         let mut buffer = Vec::new();
         write(&mut buffer, &cache).unwrap();
         let restored = read(&buffer[..]).unwrap();
-        assert_eq!(restored.empty_dirs.len(), 1);
+        assert_eq!(restored.all_dirs.len(), 1);
     }
 }

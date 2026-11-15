@@ -9,6 +9,7 @@
 //! did not change are not walked again: their previous result is reused.
 
 use super::cache::{CachedScan, dir_stamp};
+use super::compute_tree_relationships;
 use super::filters::DirFilter;
 use super::rules::{
     FileKind, classify_file, dir_facts_from_meta, dir_outcome, file_facts_from_meta,
@@ -88,7 +89,8 @@ pub fn scan_streaming_with_cache(
         .map(|s| WildMatch::new(s))
         .collect();
     let dir_filter = DirFilter::new(&settings.ignore_dirs);
-    let root_depth = root.components().count() as i32;
+    // The depth is relative to the scanned root, so the tree starts at zero.
+    let root_depth = 0;
 
     let mut nodes: Vec<DirectoryNode> = Vec::new();
     let mut stats: Vec<(PathBuf, DirStats)> = Vec::new();
@@ -104,23 +106,12 @@ pub fn scan_streaming_with_cache(
         &mut nodes,
         &mut stats,
     )?;
+    let _ = outcome;
 
-    // The root itself is never reported as empty, but it shows up in the tree
-    // when the scan found something.
-    if outcome.has_report {
-        nodes.push(DirectoryNode {
-            path: Arc::from(root.to_path_buf()),
-            name: root.to_string_lossy().into_owned(),
-            path_str: root.to_string_lossy().into_owned(),
-            depth: 0,
-            status: NodeStatus::Normal,
-            has_children: true,
-            is_expanded: true,
-            is_last_sibling: true,
-            is_hidden: false,
-            is_symlink: false,
-        });
-    }
+    // The walk reports the directories bottom-up, so the list has to be put
+    // in tree order before it can be shown.
+    nodes.sort_by(|a, b| a.path.cmp(&b.path));
+    compute_tree_relationships(&mut nodes);
 
     Ok(ScanOutcome { nodes, stats })
 }
@@ -254,13 +245,18 @@ fn scan_dir(
 
     let has_report = is_empty || is_protected || child_reports;
     if has_report {
-        nodes.push(DirectoryNode {
-            path: Arc::from(dir.to_path_buf()),
-            name: dir
-                .file_name()
+        // The root shows its full path, the children only their name.
+        let name = if depth == 0 {
+            dir.to_string_lossy().into_owned()
+        } else {
+            dir.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned(),
+                .into_owned()
+        };
+        nodes.push(DirectoryNode {
+            path: Arc::from(dir.to_path_buf()),
+            name,
             path_str: dir.to_string_lossy().into_owned(),
             depth,
             status,
@@ -318,12 +314,13 @@ fn reuse_cached(
     nodes: &mut Vec<DirectoryNode>,
     stats: &mut Vec<(PathBuf, DirStats)>,
 ) -> DirOutcome {
-    let prefix = format!("{}\\", dir.to_string_lossy().trim_end_matches('\\'));
+    let dir_str = dir.to_string_lossy().trim_end_matches('\\').to_string();
+    let prefix = format!("{}\\", dir_str);
     let mut has_report = false;
 
     // Replay the metadata of the cached subtree.
     for (path, stamp) in &cache.dir_stamps {
-        if !path.starts_with(&prefix) {
+        if !path.starts_with(&prefix) && path.as_str() != dir_str {
             continue;
         }
         stats.push((
@@ -335,9 +332,9 @@ fn reuse_cached(
         ));
     }
 
-    // Replay the cached entries of this subtree.
-    for (path, cached_status) in cache.empty_dirs.range(prefix.clone()..) {
-        if !path.starts_with(&prefix) {
+    // Replay the cached entries of this subtree, the directory itself included.
+    for (path, cached_status) in cache.all_dirs.range(dir_str.clone()..) {
+        if path.as_str() != dir_str && !path.starts_with(&prefix) {
             break;
         }
         let path_buf = PathBuf::from(path);

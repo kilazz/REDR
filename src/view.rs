@@ -1,4 +1,4 @@
-//! Presentation logic for the result tree.
+﻿//! Presentation logic for the result tree.
 //!
 //! Kept free of Slint types so it can be unit tested: the GUI only converts
 //! [`VisibleNodeData`] into the Slint model.
@@ -22,6 +22,16 @@ pub struct VisibleNodeData {
     pub is_expanded: bool,
     pub id: i32,
     pub is_root: bool,
+    /// The connectors of the row, one per level.
+    ///
+    /// The kinds are:
+    /// - `0`: nothing,
+    /// - `1`: a vertical line that continues below,
+    /// - `2`: a vertical line that continues below, with a horizontal arm,
+    /// - `3`: a vertical line that stops, with a horizontal arm.
+    ///
+    /// The rows of one group all draw their line in the same column, so the
+    /// vertical line of a group is continuous.
     pub tree_lines: Vec<i32>,
     pub is_hidden: bool,
     pub is_symlink: bool,
@@ -84,9 +94,11 @@ pub fn rebuild_visible_items(folders: &[DirectoryNode], query: &str) -> Vec<Visi
             stack.push(i);
         }
     }
+
+    // The connectors of every row, computed from the order of the tree.
+    let tree_lines = compute_tree_lines(folders);
     let mut result = Vec::new();
     let mut hide_depth = i32::MAX;
-    let mut active_depths: Vec<bool> = Vec::new();
 
     for (i, node) in folders.iter().enumerate() {
         if !include[i] {
@@ -94,31 +106,6 @@ pub fn rebuild_visible_items(folders: &[DirectoryNode], query: &str) -> Vec<Visi
         }
         if node.depth <= hide_depth {
             hide_depth = i32::MAX;
-
-            if node.depth > 0 {
-                let idx = (node.depth - 1) as usize;
-                if active_depths.len() <= idx {
-                    active_depths.resize(idx + 1, false);
-                }
-                active_depths[idx] = !node.is_last_sibling;
-            }
-
-            let mut tree_lines_vec = Vec::new();
-            for d in 0..(node.depth - 1) {
-                let d = d as usize;
-                if d < active_depths.len() && active_depths[d] {
-                    tree_lines_vec.push(1);
-                } else {
-                    tree_lines_vec.push(0);
-                }
-            }
-            if node.depth > 0 {
-                if node.is_last_sibling {
-                    tree_lines_vec.push(3);
-                } else {
-                    tree_lines_vec.push(2);
-                }
-            }
 
             result.push(VisibleNodeData {
                 name: node.name.clone(),
@@ -129,7 +116,7 @@ pub fn rebuild_visible_items(folders: &[DirectoryNode], query: &str) -> Vec<Visi
                 is_expanded: node.is_expanded,
                 id: i as i32,
                 is_root: node.depth == 0,
-                tree_lines: tree_lines_vec,
+                tree_lines: tree_lines[i].clone(),
                 is_hidden: node.is_hidden,
                 is_symlink: node.is_symlink,
                 is_group_header: false,
@@ -140,6 +127,65 @@ pub fn rebuild_visible_items(folders: &[DirectoryNode], query: &str) -> Vec<Visi
             }
         }
     }
+    result
+}
+
+/// The kinds of connector a row can draw.
+const LINE_NONE: i32 = 0;
+/// A vertical line that runs through the whole row.
+const LINE_VERTICAL: i32 = 1;
+/// A vertical line that runs through the whole row, with a horizontal arm.
+const LINE_TEE: i32 = 2;
+/// A vertical line that stops in the middle of the row, with a horizontal arm.
+const LINE_ELBOW: i32 = 3;
+
+/// Computes the connectors of every row of the tree.
+///
+/// The rows have to be in tree order (a directory, then its children, then the
+/// next sibling). The connectors of one group share a column, so the vertical
+/// line of a group is continuous from the first to the last member.
+fn compute_tree_lines(folders: &[DirectoryNode]) -> Vec<Vec<i32>> {
+    let mut result = vec![Vec::new(); folders.len()];
+    // The ancestors of the current row, by depth.
+    let mut stack: Vec<usize> = Vec::new();
+
+    for (i, node) in folders.iter().enumerate() {
+        while stack.len() > node.depth as usize {
+            stack.pop();
+        }
+
+        if node.depth > 0 {
+            let mut lines = Vec::with_capacity(node.depth as usize);
+
+            // The columns of the ancestors: the vertical line of a group is
+            // drawn while the group has more members below this row.
+            for c in 0..(node.depth as usize - 1) {
+                // The column `c` belongs to the ancestor at depth `c + 1`.
+                let keeps_going = stack
+                    .get(c + 1)
+                    .map(|&a| !folders[a].is_last_sibling)
+                    .unwrap_or(false);
+                lines.push(if keeps_going {
+                    LINE_VERTICAL
+                } else {
+                    LINE_NONE
+                });
+            }
+
+            // The column of the row itself: the elbow that joins it to its
+            // group.
+            if node.is_last_sibling {
+                lines.push(LINE_ELBOW);
+            } else {
+                lines.push(LINE_TEE);
+            }
+
+            result[i] = lines;
+        }
+
+        stack.push(i);
+    }
+
     result
 }
 

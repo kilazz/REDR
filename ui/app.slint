@@ -35,6 +35,7 @@ export global AppTheme {
     out property <color> bg-main: dark ? #1e1e1e : #f5f5f5;
     out property <color> bg-panel: dark ? #252526 : #ffffff;
     out property <color> bg-hover: dark ? #2d2d30 : #e8e8e8;
+    out property <color> bg-empty: dark ? #1a1a1c : #ffffff;
     out property <color> border: dark ? #3e3e42 : #d0d0d0;
 
     out property <color> text-normal: dark ? #D4D4D4 : #1f1f1f;
@@ -48,10 +49,23 @@ export global AppTheme {
 
     out property <color> folder-normal: #E0A96D;
 
+    // The lines that connect the folders of the tree.
+    out property <color> tree-line: dark ? #4a4a4a : #c2c2c2;
+
     out property <color> primary: dark ? #0e639c : #1a6fb5;
     out property <color> danger: #e04545;
     out property <color> btn-dark: dark ? #3a3a3a : #dcdcdc;
     out property <color> btn-grey: dark ? #444444 : #c8c8c8;
+}
+
+// The geometry of the rows of the result tree.
+export global AppMetrics {
+    // The width of one level of the tree.
+    out property <length> tree-level-width: 18px;
+    // The distance between the elements of a row.
+    out property <length> tree-row-spacing: 8px;
+    // The width of the column with the expand arrow.
+    out property <length> tree-chevron-width: 15px;
 }
 
 export global AppState {
@@ -294,7 +308,7 @@ component TabButton {
 
         txt := Text {
             text: root.text;
-            color: active ? #ffffff : AppTheme.text-muted;
+            color: active ? AppTheme.text-normal : AppTheme.text-muted;
             font-size: 12px;
             font-weight: active ? 600 : 400;
             horizontal-alignment: center;
@@ -309,7 +323,7 @@ component TabButton {
     states [
         hover when ta.has-hover && !active: {
             rect.background: AppTheme.bg-panel;
-            txt.color: #cccccc;
+            txt.color: AppTheme.text-normal;
         }
     ]
 }
@@ -337,7 +351,7 @@ component CustomButton {
 
             Text {
                 text: root.text;
-                color: !enabled ? #666666 : #ffffff;
+                color: !enabled ? AppTheme.text-muted : #ffffff;
                 font-size: 12px;
                 font-weight: 500;
                 horizontal-alignment: center;
@@ -395,7 +409,7 @@ component LegendPanel inherits Rectangle {
         Text {
             text: @tr("Icon Meanings");
             font-weight: 700;
-            color: #FFFFFF;
+            color: AppTheme.text-normal;
             font-size: 13px;
         }
 
@@ -406,7 +420,7 @@ component LegendPanel inherits Rectangle {
 
         LegendRow {
             label: @tr("Hidden (Semi-transp.)");
-            label-color: #A9A9A9;
+            label-color: AppTheme.text-muted;
             FolderIcon {
                 opacity: 0.5;
             }
@@ -414,7 +428,7 @@ component LegendPanel inherits Rectangle {
 
         LegendRow {
             label: @tr("Symlink / Junction");
-            label-color: #A9A9A9;
+            label-color: AppTheme.text-muted;
             FolderIcon { }
 
             Path {
@@ -505,7 +519,7 @@ component DirectoryTreeRow inherits Rectangle {
 
     height: 28px;
     background: row-ta.has-hover ? AppTheme.bg-hover : AppTheme.bg-main;
-    border-radius: 2px;
+    border-radius: 3px;
     animate background { duration: 100ms; }
 
     row-ta := TouchArea {
@@ -526,34 +540,40 @@ component DirectoryTreeRow inherits Rectangle {
         padding-right: 8px;
         spacing: 8px;
         alignment: start;
+        // The connectors of the tree: one column per level.
         for line in item.tree_lines: Rectangle {
-            width: 20px;
+            width: AppMetrics.tree-level-width;
             height: 28px;
+            // The vertical part of the connector.
             if line == 1 || line == 2: Rectangle {
                 x: parent.width / 2;
                 y: 0px;
                 width: 1px;
                 height: parent.height;
-                background: #444444;
+                background: AppTheme.tree-line;
             }
             if line == 3: Rectangle {
                 x: parent.width / 2;
                 y: 0px;
                 width: 1px;
                 height: parent.height / 2;
-                background: #444444;
+                background: AppTheme.tree-line;
             }
+            // The horizontal part, reaching from the connector to the icon.
+            // With an expand arrow in between, the line ends at the arrow.
             if line == 2 || line == 3: Rectangle {
                 x: parent.width / 2;
                 y: parent.height / 2;
-                width: parent.width / 2;
+                width: parent.width / 2
+                    + AppMetrics.tree-row-spacing
+                    + (item.has_children ? 0px : (AppMetrics.tree-chevron-width + AppMetrics.tree-row-spacing));
                 height: 1px;
-                background: #444444;
+                background: AppTheme.tree-line;
             }
         }
 
         Rectangle {
-            width: 15px;
+            width: AppMetrics.tree-chevron-width;
             if item.has_children: ExpandCollapseIcon {
                 is_expanded: item.is_expanded;
                 y: 8px;
@@ -584,11 +604,15 @@ component DirectoryTreeRow inherits Rectangle {
             }
             if !item.is_root && item.status == 0: NeverEmptyFolderIcon {
                 y: 6px;
-                fill-color: AppTheme.text-normal;
+                fill-color: AppTheme.text-muted;
             }
             if !item.is_root && item.status == 1: FolderIcon {
                 y: 6px;
                 fill-color: AppTheme.status-empty;
+            }
+            if !item.is_root && item.status == 5: FolderIcon {
+                y: 6px;
+                fill-color: AppTheme.status-orphaned;
             }
             if !item.is_root && item.is_symlink: Path {
                 width: 7px;
@@ -607,12 +631,13 @@ component DirectoryTreeRow inherits Rectangle {
             vertical-alignment: center;
             font-size: item.is_group_header ? 13px : 12px;
             font-weight: item.is_group_header ? 700 : 400;
+            overflow: elide;
         }
     }
 }
 
 component EmptyState inherits Rectangle {
-    background: #1a1a1c;
+    background: AppTheme.bg-empty;
     border-radius: 4px;
     VerticalLayout {
         alignment: center;
@@ -627,14 +652,14 @@ component EmptyState inherits Rectangle {
                     width: 100%;
                     height: 100%;
                     commands: "M 4 8 L 16 8 L 22 14 L 44 14 L 44 40 L 4 40 Z";
-                    fill: #858585;
+                    fill: AppTheme.text-muted;
                 }
 
                 Path {
                     width: 100%;
                     height: 100%;
                     commands: "M 24 18 L 24 30 M 19 25 L 24 30 L 29 25";
-                    stroke: #ffffff;
+                    stroke: AppTheme.text-normal;
                     stroke-width: 3px;
                 }
             }
@@ -643,7 +668,7 @@ component EmptyState inherits Rectangle {
         Text {
             text: @tr("No Directory Scanned");
             horizontal-alignment: center;
-            color: #ffffff;
+            color: AppTheme.text-normal;
             font-size: 14px;
             font-weight: 600;
             opacity: 0.7;
